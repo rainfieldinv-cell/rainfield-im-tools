@@ -1,0 +1,9 @@
+streamlit
+python-pptx
+PyMuPDF==1.26.7
+pdfplumber
+python-docx
+Pillow
+anthropic
+python-dotenv
+pdf2image

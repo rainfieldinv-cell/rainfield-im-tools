@@ -1,0 +1,75 @@
+# 가상환경 폴더 (용량이 크고 개인 환경마다 다르므로 제외)
+venv/
+
+# 접근 코드 등 민감한 정보가 담긴 파일 (절대 공유 금지)
+.streamlit/secrets.toml
+.env
+
+# Python 캐시 파일 (자동 생성되는 불필요한 파일)
+__pycache__/
+*.pyc
+*.pyo
+
+# 운영체제 자동 생성 파일
+.DS_Store
+Thumbs.db
+
+# 임시 파일
+*.tmp
+*.log
+
+# 생성된 PPT 출력물 (자동 생성되므로 git에 불필요)
+output/
+
+# 임시 작업 폴더
+temp/
+
+# 레이아웃 분석 결과 JSON (자동 생성 파일 — 필요 시 재생성 가능)
+templates/layout_data.json
+
+# 단, 레이아웃 템플릿 원본은 git에 포함 (아래 줄로 예외 처리)
+!templates/레이아웃.pptx
+
+# 기밀 IM 문서 (PDF) — 사용자가 직접 업로드하므로 repo에 불필요
+*.pdf
+
+# 생성된 제안서 PPTX (루트 폴더) — 앱이 만들어주므로 repo에 불필요
+/[Rainfield]*.pptx
+/[신영증권]*.pptx
+/[*]*.pptx
+
+# 개발용 테스트 스크립트
+_test_*.py
+debug.log
+
+# 메모 탭 저장 파일 (런타임 데이터 — repo에 불필요)
+memos.json
+
+# 기밀 IM 원본·참고자료 (로컬에만 보관, 저장소에 올리지 않음)
+예시/
+PDF,워드(원본)/
+변환성공/
+원본보고 만든 PPT/
+*.docx
+*.doc
+*.png
+!templates/*.png
+templates/*_backup.pptx
+
+# PowerPoint/Excel 임시 락파일
+~$*
+
+# LLM 응답 캐시(로컬)
+.claude_cache/
+
+# 로컬 렌더 검증 결과물
+_test.pptx
+_render_out/
+_tr*.pdf
+_tr*.pptx
+_tr*.pkl
+_ph.pptx
+_render_tr/
+_render_ph/
+_ov.pptx
+_render_ov/

@@ -1,0 +1,7 @@
+[theme]
+# 회사 로고색 남색(네이비)을 포인트 색으로 사용 — 자금판(전)과 동일 테마
+primaryColor = "#1A2B5E"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f6f7f9"
+textColor = "#1a1a1a"
+font = "sans serif"

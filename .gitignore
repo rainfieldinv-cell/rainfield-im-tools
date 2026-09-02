@@ -1,0 +1,21 @@
+# 비밀정보
+.env
+.streamlit/secrets.toml
+
+# 캐시·임시
+.claude_cache/
+__pycache__/
+*.pyc
+*.tmp
+
+# 결과물
+산출물/
+_*.pptx
+
+# layout 은 필요한 틀만 (실제 딜 제안서가 섞여 들어가는 일이 있다)
+summary/layout/*
+!summary/layout/금융구조도_모음.pptx
+!summary/layout/요약본 레이아웃.pptx
+!summary/layout/구조도_분류.json
+!summary/layout/구조도_썸네일/
+!summary/layout/구조도_썸네일/*

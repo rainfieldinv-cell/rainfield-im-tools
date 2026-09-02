@@ -1,0 +1,3 @@
+libreoffice
+fonts-nanum
+poppler-utils

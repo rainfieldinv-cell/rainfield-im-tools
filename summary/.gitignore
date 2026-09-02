@@ -1,0 +1,27 @@
+# 비밀정보 — 절대 올리지 않는다
+.env
+.streamlit/secrets.toml
+
+# LLM 응답 캐시(로컬 전용, 용량 큼)
+.claude_cache/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 내가 만든 결과물 · 로컬 전용 도구(실행 bat/vbs, 레이아웃 원본, 예시)
+산출물/
+_내부/
+
+# 임시
+*.tmp
+_*.pptx
+
+# ★layout 폴더에는 실제 딜 제안서 PPT 를 임시로 두는 일이 있다.
+#   공개 저장소이므로 **필요한 틀 파일만** 올린다(나머지는 전부 제외).
+layout/*
+!layout/금융구조도_모음.pptx
+!layout/요약본 레이아웃.pptx
+!layout/구조도_분류.json
+!layout/구조도_썸네일/
+!layout/구조도_썸네일/*
