@@ -601,10 +601,9 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     # 딜명과 '사모사채 제안서(요약본)' 은 줄을 나눈다(한 줄로 붙이면 아무 데서나 꺾인다).
     _replace_contains(s1, "사업명(요약본)", name + chr(10) + "사모사채 제안서(요약본)")
     # ★날짜는 원본에서 뽑지 않고 **만드는 날**을 쓴다. 원본 날짜를 읽으면 자꾸 틀렸다.
-    #   틀의 자리표시가 '몇월(영어 표시) 그해년도(2026)' 이고, 26장 변환기도
-    #   datetime.now().strftime("%B") 로 영문 월을 쓴다 → 같은 방식으로 맞춘다.
+    #   숫자로 적는다(2026. 09). 영문 월은 사용자가 원하지 않는다.
     _now = _dt.datetime.now()
-    _replace_contains(s1, "몇월", f"{_now.strftime('%B')} {_now.year}")
+    _replace_contains(s1, "몇월", f"{_now.year}. {_now.month:02d}")
     _fix_cover_overlap(s1)
 
     # 슬라이드 2 : 하이라이트
@@ -973,10 +972,11 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
             seq = [(lb, bd) for lb, bd in seq if bd is not None or lb is not None]
             end = _stack(seq, x_in=x, w_in=w, top_in=_TOP, bottom_in=_BOT)
 
-            # ★넘치면 그 단을 줄여서 다시 쌓는다 — 한쪽에 4개를 넣어도 들어가게.
-            #   표는 글자 크기를, 그림은 높이를, 블록 사이 간격까지 함께 줄인다.
-            _gap, _lgap = 0.16, 0.05
-            for _try in range(6):
+            # ★사용자 지시: 글씨는 9pt 고정, **넘쳐도 줄이지 않는다.**
+            #   (표 글자가 6pt 까지 작아져 칸마다 크기가 달라 보였다)
+            #   자리만 다시 잡고 크기는 그대로 둔다.
+            _gap, _lgap, _try = 0.16, 0.05, 0
+            for _try in range(0):
                 if end <= _BOT:
                     break
                 _avail, _used = _BOT - _TOP, end - _TOP

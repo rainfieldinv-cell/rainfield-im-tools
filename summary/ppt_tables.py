@@ -56,15 +56,30 @@ def _cell_style(cell, text, head=False):
 
 
 def _borders(cell):
-    """네 변에 같은 두께·색 테두리(칸마다 선이 달라 보이던 것 방지)."""
+    """회사 표와 **똑같은** 선 서식.
+
+    회사 틀을 뜯어보니 좌우 세로선은 아예 없고 위아래 가로선만 회색으로 긋는다.
+    내가 사방에 테두리를 그리는 바람에 다른 표들과 완전히 달라 보였다.
+    """
     tcPr = cell._tc.get_or_add_tcPr()
+    tcPr.set("marL", "33513")
+    tcPr.set("marR", "33513")
+    tcPr.set("marT", "0")
+    tcPr.set("marB", "0")
+    tcPr.set("anchor", "ctr")
     for tag in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
         for e in tcPr.findall(qn(tag)):
             tcPr.remove(e)
+    for tag in ("a:lnL", "a:lnR"):                   # 세로선 없음
+        ln = tcPr.makeelement(qn(tag), {"w": "12700", "cmpd": "sng"})
+        ln.append(ln.makeelement(qn("a:noFill"), {}))
+        tcPr.append(ln)
+    for tag in ("a:lnT", "a:lnB"):                   # 가로선만 회색
         ln = tcPr.makeelement(qn(tag), {"w": "6350", "cap": "flat",
                                         "cmpd": "sng", "algn": "ctr"})
         fill = ln.makeelement(qn("a:solidFill"), {})
-        clr = fill.makeelement(qn("a:srgbClr"), {"val": "A5A5A5"})
+        clr = fill.makeelement(qn("a:schemeClr"), {"val": "bg1"})
+        clr.append(clr.makeelement(qn("a:lumMod"), {"val": "65000"}))
         fill.append(clr)
         ln.append(fill)
         tcPr.append(ln)
@@ -124,10 +139,9 @@ def add_table(slide, t, left, top, width):
         for rr in range(r0, min(r0 + rs, n_r)):
             for cc in range(c0, min(c0 + cs, n_c)):
                 filled.add((rr, cc))
-        _cell_style(cell, c["text"], head=(head and r0 == 0))
-        if head and r0 == 0:
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = HEAD_BG
+        # 회사 표는 첫 '줄' 이 아니라 **첫 열(라벨)** 을 굵게 쓴다.
+        # 배경색은 내가 임의로 넣지 않는다(다른 표들과 달라 보였다).
+        _cell_style(cell, c["text"], head=(c0 == 0 or (head and r0 == 0)))
 
     for r in range(n_r):
         for c in range(n_c):
