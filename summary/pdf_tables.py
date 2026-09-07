@@ -151,15 +151,57 @@ def read_pdf_tables(pdf_path_or_bytes, max_tables=60):
     raw = (pdf_path_or_bytes if isinstance(pdf_path_or_bytes, (bytes, bytearray))
            else open(pdf_path_or_bytes, "rb").read())
 
-    # ★먼저 PyMuPDF 로 읽는다(격자를 훨씬 잘 잡는다). 못 찾으면 pdfplumber 로.
+    # ★어느 한쪽이 항상 옳지 않다.
+    #   헌인마을 IM: PyMuPDF 가 제대로, pdfplumber 는 격자가 틀어짐
+    #   돈암동  IM: pdfplumber 가 제대로, PyMuPDF 는 페이지를 표 하나로 뭉갬
+    #   → 둘 다 읽어서 **쪽마다 더 잘 나온 쪽**을 고른다.
     try:
-        got = _mupdf_tables(raw, max_tables)
-        if got:
-            return got
+        a = _mupdf_tables(raw, 400)
     except Exception as e:
-        print(f"[표읽기] PyMuPDF 실패({type(e).__name__}) — pdfplumber 로 넘어감")
+        print(f"[표읽기] PyMuPDF 실패({type(e).__name__})")
+        a = []
+    try:
+        b = _plumber_tables(_io.BytesIO(raw), 400)
+    except Exception as e:
+        print(f"[표읽기] pdfplumber 실패({type(e).__name__})")
+        b = []
+    return _pick_better(a, b, max_tables)
 
-    src = _io.BytesIO(raw)
+
+def _score(tables):
+    """쪽 하나의 결과가 얼마나 잘 나왔는지. 낮을수록 좋다.
+
+    둘 다 실패할 때의 모습이 '여러 표를 하나로 뭉치고 칸 하나에 글을 몰아넣는 것'
+    이므로, **뭉친 칸이 적고 표가 잘게 나뉜 쪽**을 좋게 본다.
+    """
+    if not tables:
+        return (0, 10 ** 6, 10 ** 6)
+    cells = [c for t in tables for c in t["cells"]]
+    if not cells:
+        return (0, 10 ** 6, 10 ** 6)
+    # ① 표가 잘게 나뉜 쪽이 좋다(둘 다 실패할 때의 모습이 '여러 표를 하나로 뭉치기')
+    # ② 같으면 군더더기 행이 적은 쪽(선이 겹쳐 없는 행이 생기는 것을 피한다)
+    # ③ 그래도 같으면 글이 한 칸에 몰리지 않은 쪽
+    giant = sum(1 for c in cells
+                if len(c["text"]) > 80 or c["text"].count(chr(10)) >= 4)
+    return (-len(tables), sum(t["rows"] for t in tables), giant)
+
+
+def _pick_better(a, b, max_tables):
+    """쪽 번호별로 더 잘 나온 쪽을 골라 합친다."""
+    pages = sorted({t["page"] for t in a} | {t["page"] for t in b})
+    out = []
+    for pno in pages:
+        ta = [t for t in a if t["page"] == pno]
+        tb = [t for t in b if t["page"] == pno]
+        out += ta if _score(ta) <= _score(tb) else tb
+    out.sort(key=lambda t: (t["page"], t.get("bbox", (0, 0))[1]))
+    for i, t in enumerate(out, 1):
+        t["key"] = f"표 {t['page']}-{i}"
+    return out[:max_tables]
+
+
+def _plumber_tables(src, max_tables=400):
     out = []
     with pdfplumber.open(src) as doc:
         for pno, page in enumerate(doc.pages, 1):
@@ -174,7 +216,8 @@ def read_pdf_tables(pdf_path_or_bytes, max_tables=60):
                 if not any(c["text"] for c in info["cells"]):
                     continue                      # 글자 없는 껍데기 표
                 info["page"] = pno
-                info["title"] = _title_for(page, tbl, f"{pno}쪽 표{ti}")
+                info["title"] = _tidy_title(
+                    _title_for(page, tbl, ""), info, f"{pno}쪽 표{ti}")
                 info["key"] = f"표 {pno}-{ti}"
                 out.append(info)
                 if len(out) >= max_tables:
@@ -203,7 +246,9 @@ def _mupdf_tables(pdf_bytes, max_tables=60):
                 if info:
                     info["page"] = pno + 1
                     info["key"] = f"표 {pno + 1}-{ti}"
-                    info["title"] = _mupdf_title(page, t, f"{pno + 1}쪽 표{ti}")
+                    info["title"] = _tidy_title(
+                        _mupdf_title(page, t, ""), info,
+                        f"{pno + 1}쪽 표{ti}")
                     out.append(info)
                     if len(out) >= max_tables:
                         return out
@@ -267,3 +312,20 @@ def _mupdf_title(page, t, fallback):
                  if y0 - 26 <= w[3] <= y0 + 2 and w[2] >= x0 - 6 and w[0] <= x1]
         best = " ".join(w[4] for w in sorted(above, key=lambda w: w[0]))
     return _clean(best)[:40] or fallback
+
+
+# ── 제목 다듬기 ─────────────────────────────────────
+#  왼쪽 여백 글자를 전부 긁으면 옆 표의 라벨까지 붙는다
+#  ('구분 진행 경과 사업일정 추진 계획' 처럼).
+#  표 안에 이미 있는 말은 빼고, 짧은 덩어리 하나만 남긴다.
+_STOP = ("구분", "구 분", "내용", "내 용", "비고", "비 고", "일정", "일 정",
+         "금액", "합계", "진행", "경과", "추진", "계획", "단위")
+
+
+def _tidy_title(raw, table_info, fallback):
+    words = [w for w in (raw or "").split() if w]
+    words = [w for w in words if w not in _STOP]
+    inside = {c["text"].strip() for c in (table_info or {}).get("cells", [])}
+    words = [w for w in words if w not in inside]
+    out = " ".join(words).strip(" :·-—")
+    return out[:34] or fallback
