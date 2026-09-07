@@ -465,10 +465,58 @@ def scale_tables_in_group(grp, ratio: float, min_pt: float = 4.5):
 
 
 # ── 채운 구조도 만들기 ───────────────────────────────
-def _set_text(tf, s):
-    """서식(글꼴·크기·색)은 두고 글자만 바꾼다."""
+def _units(s):
+    """글자 폭을 em 단위로. 한글·한자는 전각, 그 외는 반각."""
+    u = 0.0
+    for ch in str(s):
+        if "가" <= ch <= "힣" or "一" <= ch <= "鿿":
+            u += 1.0
+        elif ch == " ":
+            u += 0.3
+        else:
+            u += 0.55
+    return u
+
+
+def _fit_text(tf, width_in, min_pt=6.0):
+    """글이 상자 폭을 넘으면 글씨를 조금 줄여 **한 줄로** 유지한다.
+
+    ★안 그러면 두 줄이 되면서 상자 밖으로 넘쳐 아래 상자를 덮는다
+      ('Tr.C (기초자산, 50억원)' 이 잘려 보이던 원인).
+    """
+    if width_in <= 0:
+        return
+    txt = (tf.text or "").strip()
+    if not txt:
+        return
+    longest = max(_units(ln) for ln in txt.split(chr(10)))
+    if longest <= 0:
+        return
+    cur = None
+    for para in tf.paragraphs:
+        for run in para.runs:
+            if run.font.size:
+                cur = run.font.size.pt
+                break
+        if cur:
+            break
+    cur = cur or 9.0
+    avail = max(0.1, width_in - 0.10)                 # 좌우 여백
+    fit = avail * 72.0 / longest
+    if fit >= cur:
+        return
+    new = max(min_pt, round(fit, 1))
+    for para in tf.paragraphs:
+        for run in para.runs:
+            run.font.size = Pt(new)
+
+
+def _set_text(tf, s, width_in=0.0):
+    """서식(글꼴·크기·색)은 두고 글자만 바꾼다. 넘치면 글씨를 조금 줄인다."""
     from engine_bits import replace_text_keep_runs
     replace_text_keep_runs(tf, s)
+    if width_in:
+        _fit_text(tf, width_in)
 
 
 def _drop(sh):
@@ -524,11 +572,15 @@ def build_diagram(no: int, values: dict, out_path: str, removed=None,
         if kind == "cell":
             _, _, r, c = f["loc"]
             try:
-                _set_text(sh.table.cell(r, c).text_frame, val)
+                t = sh.table
+                w_in = sum((t.columns[cc].width or 0)
+                           for cc in range(c, min(c + f["loc"][3] if False else c + 1,
+                                                  len(t.columns)))) / EMU_IN
+                _set_text(t.cell(r, c).text_frame, val, w_in)
             except Exception:
                 pass
         else:
-            _set_text(sh.text_frame, val)
+            _set_text(sh.text_frame, val, (sh.width or 0) / EMU_IN)
 
     # 뺀 항목 없애기 — 뒤에서부터 지워야 남은 것들의 순번이 안 밀린다.
     for f in sorted((f for f in info["fields"] if f["key"] in removed),
@@ -573,6 +625,21 @@ def build_diagram(no: int, values: dict, out_path: str, removed=None,
                 m = _MARK_HEAD.match(txt) if txt else None
                 if m and len(txt) > m.end():
                     _set_text(t.cell(r, c).text_frame, txt[m.end():].strip())
+
+    # ★마지막으로 모든 글상자·표칸을 훑어 상자를 넘치는 글씨를 줄인다.
+    #   틀에 원래 있던 글자도 넘칠 수 있다(두 줄이 되면 아래 상자를 덮는다).
+    for sh, _p in list(_walk(keep.shapes)):
+        try:
+            if sh.has_table:
+                t = sh.table
+                for r in range(len(t.rows)):
+                    for c in range(len(t.columns)):
+                        _fit_text(t.cell(r, c).text_frame,
+                                  (t.columns[c].width or 0) / EMU_IN)
+            elif sh.has_text_frame:
+                _fit_text(sh.text_frame, (sh.width or 0) / EMU_IN)
+        except Exception:
+            pass
 
     prs.save(out_path)
     return out_path
