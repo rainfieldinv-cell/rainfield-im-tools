@@ -12,7 +12,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from summary_pipeline import (extract_summary, build_summary,      # noqa: E402
-                              build_highlight_preview)
+                              build_highlight_preview, highlights_from_pages)
 try:      # 배포 직후 옛 모듈이 남아 있어도 앱 전체가 죽지 않게 한다
     from summary_pipeline import extra_blocks_of                   # noqa: E402
 except ImportError:
@@ -273,7 +273,20 @@ elif step == 2:
         if hb1.button("🤖 Executive Summary 자동 추출", use_container_width=True,
                       help="IM의 'Executive Summary' 항목만 읽어 3개 카드로 정리합니다"
                            "(그 뒤 직접 수정)."):
-            src = data.get("highlights") or []
+            # ★위에서 고른 **그 쪽만** 읽는다.
+            #   전에는 처음에 문서 전체로 뽑아둔 결과를 그대로 다시 써서,
+            #   쪽 번호를 고쳐도 아무것도 달라지지 않았다.
+            _sel = st.session_state.get("es_pages_sel") or []
+            src = []
+            if _sel:
+                with st.spinner(f"{', '.join(map(str, _sel))}쪽을 읽는 중..."):
+                    try:
+                        src = highlights_from_pages(
+                            st.session_state.get("_pdf_bytes"), _sel)
+                    except Exception as _he:
+                        st.warning(f"그 쪽에서 못 뽑았습니다 — {_he}")
+            if not src:
+                src = data.get("highlights") or []
             hl = [dict(h) for h in src][:3]
             while len(hl) < 3:
                 hl.append({"title": "", "subtitle": "", "bullets": []})
@@ -321,6 +334,7 @@ elif step == 2:
                     elif tok.isdigit():
                         pages_sel.append(int(tok))
                 pages_sel = [p for p in pages_sel if 1 <= p <= npage]
+                st.session_state["es_pages_sel"] = pages_sel   # 자동추출이 쓴다
                 if det:
                     st.caption(f"자동 감지: {', '.join(str(p) for p in det)}p "
                                f"(필요하면 위에서 조정)")
@@ -681,11 +695,18 @@ elif step == 4:
         S = st.session_state["slots"]
         S2 = st.session_state["slots2"]
 
-        def _clear_slot_widgets(tag, side, n):
-            """칸을 옮기거나 지우면 selectbox 위젯 값이 옛 자리에 남아 되살아난다.
-               해당 단의 위젯 상태를 지워 목록 값이 그대로 반영되게 한다."""
-            for j in range(n + 2):
+        def _clear_slot_widgets(tag, side, n, seq=None):
+            """칸을 지우거나 옮긴 뒤, 각 칸의 선택값을 **다시 써 넣는다.**
+
+            ★지우기만 하면 안 된다. 3번을 지워도 4·5번 위젯에 옛 값이 남아
+              한 칸씩 밀려 보이고, 결국 **맨 끝이 지워진 것처럼** 된다.
+              (사업일정을 지웠는데 맨 밑이 사라지던 원인)
+            """
+            for j in range(n + 4):
                 st.session_state.pop(f"sl{tag}_{side}_{j}", None)
+            if seq is not None:
+                for j, v in enumerate(seq):
+                    st.session_state[f"sl{tag}_{side}_{j}"] = v
 
         # ★칸을 하나씩 추가·수정·삭제·이동한다(칸 수를 한꺼번에 정하지 않음).
         def _slot_editor(store, tag, side, title):
@@ -701,16 +722,16 @@ elif step == 4:
                 if c2.button("↑", key=f"up{tag}_{side}_{i}", disabled=(i == 0),
                              help="위로"):
                     seq[i - 1], seq[i] = seq[i], seq[i - 1]
-                    _clear_slot_widgets(tag, side, len(seq))
+                    _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
                 if c3.button("↓", key=f"dn{tag}_{side}_{i}",
                              disabled=(i == len(seq) - 1), help="아래로"):
                     seq[i + 1], seq[i] = seq[i], seq[i + 1]
-                    _clear_slot_widgets(tag, side, len(seq))
+                    _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
                 if c4.button("✕", key=f"rm{tag}_{side}_{i}", help="이 칸 삭제"):
                     seq.pop(i)
-                    _clear_slot_widgets(tag, side, len(seq) + 1)
+                    _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
             if st.button("＋ 칸 추가", key=f"add{tag}_{side}",
                          disabled=(len(seq) >= 6), use_container_width=True):

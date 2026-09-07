@@ -535,6 +535,55 @@ def _border(shape, rgb="000000", pt=0.75):
     spPr.append(ln)
 
 
+HL_SYS = """당신은 부동산 금융 IM 을 읽고 제안서 표지 다음 장에 넣을
+'핵심 3가지' 카드를 만드는 전문가다. 아래는 원문의 Executive Summary 부분이다.
+
+규칙:
+- 원문에 있는 말만 쓴다. 지어내지 않는다. 숫자·단위·괄호는 원문 그대로.
+- 카드는 정확히 3개.
+- title: 12자 안쪽의 짧은 제목
+- subtitle: 20자 안쪽 한 줄(없으면 "")
+- bullets: 근거 2~3줄, 각 줄은 원문 문장을 거의 그대로
+
+출력은 JSON 배열만:
+[{"title":"..","subtitle":"..","bullets":["..",".."]}, ...]"""
+
+
+def highlights_from_pages(pdf_bytes, pages):
+    """지정한 **쪽만** 읽어 하이라이트 카드 3개를 만든다.
+
+    전에는 처음에 문서 전체로 뽑아둔 결과를 그대로 다시 썼다. 그래서 사용자가
+    Executive Summary 쪽 번호를 고쳐도 아무 것도 달라지지 않았다.
+    """
+    import fitz
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        txt = []
+        for pno in pages or []:
+            if 1 <= pno <= doc.page_count:
+                txt.append(str(pno) + "쪽" + chr(10) + (doc[pno - 1].get_text() or ""))
+    finally:
+        doc.close()
+    body = (chr(10) + chr(10)).join(txt).strip()
+    if not body:
+        return []
+    res = call_claude(HL_SYS, body, slide_num=802, pdf_context=body,
+                      prompt_version="highlights_v1")
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error") or "하이라이트 추출 실패")
+    data = res["data"]
+    if isinstance(data, dict):
+        data = data.get("highlights") or data.get("cards") or []
+    out = []
+    for h in (data or [])[:3]:
+        if not isinstance(h, dict):
+            continue
+        out.append({"title": str(h.get("title") or "")[:40],
+                    "subtitle": str(h.get("subtitle") or "")[:60],
+                    "bullets": [str(b) for b in (h.get("bullets") or []) if b]})
+    return out
+
+
 def build_highlight_preview(data: dict, out_path: str) -> str:
     """하이라이트 슬라이드 1장만 만든 PPTX(미리보기용)."""
     return build_summary(data, None, out_path, pages=1, _highlight_only=True)
