@@ -483,6 +483,10 @@ elif step == 3:
                              caption="번호는 아래 입력칸을 찾기 쉬우라고 붙인 것입니다. "
                                      "완성된 구조도에는 나오지 않습니다.")
             with _fc:
+                # ★입력칸만 따로 스크롤되게 한다. 그냥 두면 칸이 길어서 아래로
+                #   내리는 순간 왼쪽 그림이 화면 밖으로 나가 대조할 수가 없다.
+                _box = st.container(height=560, border=False)
+            with _box:
                 for _f in _d["fields"]:
                     _k = _f["key"]
                     _vk, _xk = f"dv_{_no}_{_k}", f"dx_{_no}_{_k}"

@@ -166,17 +166,56 @@ def find_es_pages(pdf_bytes: bytes) -> list:
     return out
 
 
-def pptx_slide_png(pptx_path: str, slide_no: int = 1, w: int = 1600, h: int = 1108):
-    """PPTX 한 장을 PNG bytes 로 (PowerPoint COM). 실패 시 (None, 사유).
+def _pptx_png_soffice(pptx_path: str, slide_no: int = 1, zoom: float = 2.0):
+    """LibreOffice 로 PPTX → PDF → PNG. 웹(리눅스 서버)에서 쓰는 길.
 
-    이 PC엔 LibreOffice 가 없어 PowerPoint 로 내보낸다.
+    회사 공용 웹에는 파워포인트가 없어 미리보기가 안 나왔다.
+    packages.txt 에 libreoffice 가 있으므로 이걸로 만든다.
+    """
+    import os as _os
+    import shutil as _sh
+    import subprocess as _sp
+    import tempfile as _tf
+
+    exe = _sh.which("soffice") or _sh.which("libreoffice")
+    if not exe:
+        return None, "LibreOffice 가 없어 미리보기를 만들 수 없습니다."
+    tmp = _tf.mkdtemp(prefix="rf_so_")
+    try:
+        _sp.run([exe, "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", tmp, _os.path.abspath(pptx_path)],
+                check=True, timeout=180,
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        pdfs = [f for f in _os.listdir(tmp) if f.lower().endswith(".pdf")]
+        if not pdfs:
+            return None, "LibreOffice 가 PDF 를 만들지 못했습니다."
+        import fitz
+        doc = fitz.open(_os.path.join(tmp, pdfs[0]))
+        try:
+            if not (1 <= slide_no <= doc.page_count):
+                return None, f"슬라이드 {slide_no} 없음(총 {doc.page_count}장)"
+            pix = doc[slide_no - 1].get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            return pix.tobytes("png"), None
+        finally:
+            doc.close()
+    except Exception as e:
+        return None, f"LibreOffice 변환 실패: {e}"
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+
+
+def pptx_slide_png(pptx_path: str, slide_no: int = 1, w: int = 1600, h: int = 1108):
+    """PPTX 한 장을 PNG bytes 로. 실패 시 (None, 사유).
+
+    내 컴퓨터에서는 파워포인트로, 웹에서는 LibreOffice 로 만든다.
+    (웹에 파워포인트가 없어 미리보기가 아예 안 나오던 문제)
     """
     import os as _os
     import tempfile as _tf
     try:
         import win32com.client
     except Exception:
-        return None, "pywin32(win32com)가 없어 미리보기를 만들 수 없습니다."
+        return _pptx_png_soffice(pptx_path, slide_no)
     out = _os.path.join(_tf.mkdtemp(prefix="rf_hl_"), "s.png")
     app = None
     try:
@@ -194,6 +233,9 @@ def pptx_slide_png(pptx_path: str, slide_no: int = 1, w: int = 1600, h: int = 11
         with open(out, "rb") as f:
             return f.read(), None
     except Exception as e:
+        alt, alt_err = _pptx_png_soffice(pptx_path, slide_no)
+        if alt:
+            return alt, None
         return None, f"PowerPoint 변환 실패: {e}"
     finally:
         try:
