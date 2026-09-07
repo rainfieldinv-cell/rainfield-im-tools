@@ -61,6 +61,11 @@ def read_table(page, tbl):
         return None
     xs = _axis([v for c in rects for v in (c[0], c[2])])
     ys = _axis([v for c in rects for v in (c[1], c[3])])
+    # 3pt 도 안 되는 칸은 선이 두 겹으로 그어진 것 → 진짜 행/열이 아니다
+    xs = [v for i, v in enumerate(xs)
+          if i == 0 or i == len(xs) - 1 or xs[i + 1] - v > 3.0]
+    ys = [v for i, v in enumerate(ys)
+          if i == 0 or i == len(ys) - 1 or ys[i + 1] - v > 3.0]
     n_col, n_row = len(xs) - 1, len(ys) - 1
     if n_row < _MIN_ROWS or n_col < _MIN_COLS:
         return None
@@ -89,16 +94,26 @@ def read_table(page, tbl):
         for rr in range(c["r"], c["r"] + c["rs"]):
             for cc in range(c["c"], c["c"] + c["cs"]):
                 taken.add((rr, cc))
-    for r in range(n_row):
-        for c in range(n_col):
+    # ★한 칸씩 자르면 안 된다. 세로로 이어진 빈 자리는 **원래 하나의 병합 칸**이라,
+    #   줄마다 자르면 같은 글자가 여러 번 복사된다(비중 '6.9%' 가 두 번 나오던 원인).
+    #   → 이어진 구간을 통째로 한 칸으로 만든다. 그래야 병합이 그대로 살아난다.
+    for c in range(n_col):
+        r = 0
+        while r < n_row:
             if (r, c) in taken:
+                r += 1
                 continue
+            r2 = r
+            while r2 + 1 < n_row and (r2 + 1, c) not in taken:
+                r2 += 1
             try:
-                txt = page.crop((xs[c], ys[r], xs[c + 1], ys[r + 1]),
+                txt = page.crop((xs[c], ys[r], xs[c + 1], ys[r2 + 1]),
                                 strict=False).extract_text()
             except Exception:
                 txt = ""
-            cells.append({"r": r, "c": c, "rs": 1, "cs": 1, "text": _clean(txt)})
+            cells.append({"r": r, "c": c, "rs": r2 - r + 1, "cs": 1,
+                          "text": _clean(txt)})
+            r = r2 + 1
 
     cells.sort(key=lambda x: (x["r"], x["c"]))
     # 열 폭·행 높이 비율 — PPT 표를 원본과 같은 모양으로 그리는 데 쓴다
@@ -133,9 +148,18 @@ def read_pdf_tables(pdf_path_or_bytes, max_tables=60):
     반환: [{"key","title","page","rows","cols","cells"}...]  (원문 순서)
     """
     import io as _io
-    src = (_io.BytesIO(pdf_path_or_bytes)
-           if isinstance(pdf_path_or_bytes, (bytes, bytearray))
-           else pdf_path_or_bytes)
+    raw = (pdf_path_or_bytes if isinstance(pdf_path_or_bytes, (bytes, bytearray))
+           else open(pdf_path_or_bytes, "rb").read())
+
+    # ★먼저 PyMuPDF 로 읽는다(격자를 훨씬 잘 잡는다). 못 찾으면 pdfplumber 로.
+    try:
+        got = _mupdf_tables(raw, max_tables)
+        if got:
+            return got
+    except Exception as e:
+        print(f"[표읽기] PyMuPDF 실패({type(e).__name__}) — pdfplumber 로 넘어감")
+
+    src = _io.BytesIO(raw)
     out = []
     with pdfplumber.open(src) as doc:
         for pno, page in enumerate(doc.pages, 1):
@@ -156,3 +180,90 @@ def read_pdf_tables(pdf_path_or_bytes, max_tables=60):
                 if len(out) >= max_tables:
                     return out
     return out
+
+
+# ── PyMuPDF 로 읽기 ─────────────────────────────────
+#  pdfplumber 는 선을 조각조각 보아 어떤 문서에서는 격자가 크게 틀어진다
+#  (헌인마을 IM: 13행 7열짜리를 22행 7열로, 일부 열은 선 자체를 못 찾음).
+#  PyMuPDF 의 lines_strict 는 같은 표를 제대로 잡았다 → 이쪽을 먼저 쓴다.
+#  PyMuPDF 는 이미 깔려 있어 무게가 늘지 않는다.
+def _mupdf_tables(pdf_bytes, max_tables=60):
+    import fitz
+    out = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    try:
+        for pno in range(doc.page_count):
+            page = doc[pno]
+            try:
+                found = page.find_tables(strategy="lines_strict").tables
+            except Exception:
+                continue
+            for ti, t in enumerate(found, 1):
+                info = _from_mupdf(page, t)
+                if info:
+                    info["page"] = pno + 1
+                    info["key"] = f"표 {pno + 1}-{ti}"
+                    info["title"] = _mupdf_title(page, t, f"{pno + 1}쪽 표{ti}")
+                    out.append(info)
+                    if len(out) >= max_tables:
+                        return out
+    finally:
+        doc.close()
+    return out
+
+
+def _from_mupdf(page, t):
+    """PyMuPDF 표 → {rows, cols, cells}. 빈 줄·빈 칸은 접고 병합은 살린다."""
+    grid = t.extract()
+    if not grid:
+        return None
+    n_r = len(grid)
+    n_c = max(len(r) for r in grid)
+    grid = [list(r) + [None] * (n_c - len(r)) for r in grid]
+
+    def cell(r, c):
+        v = grid[r][c]
+        return _clean(v) if v else ""
+
+    keep_r = [r for r in range(n_r) if any(cell(r, c) for c in range(n_c))]
+    keep_c = [c for c in range(n_c) if any(cell(r, c) for r in range(n_r))]
+    if len(keep_r) < _MIN_ROWS or len(keep_c) < _MIN_COLS:
+        return None
+
+    # 세로로 이어지는 같은 글자는 원래 한 칸(병합)이었던 것
+    txt = [[cell(r, c) for c in keep_c] for r in keep_r]
+    R, C = len(txt), len(txt[0])
+    used = [[False] * C for _ in range(R)]
+    cells = []
+    for r in range(R):
+        for c in range(C):
+            if used[r][c] or not txt[r][c]:
+                continue
+            rs = 1
+            while r + rs < R and not txt[r + rs][c]:
+                rs += 1
+            cs = 1
+            while c + cs < C and not txt[r][c + cs] and all(
+                    not txt[r + k][c + cs] for k in range(rs)):
+                cs += 1
+            for rr in range(r, r + rs):
+                for cc in range(c, c + cs):
+                    used[rr][cc] = True
+            cells.append({"r": r, "c": c, "rs": rs, "cs": cs, "text": txt[r][c]})
+    if not cells:
+        return None
+    return {"rows": R, "cols": C, "cells": cells,
+            "col_ratio": [1.0] * C, "row_ratio": [1.0] * R,
+            "bbox": tuple(round(v, 1) for v in t.bbox)}
+
+
+def _mupdf_title(page, t, fallback):
+    x0, y0, x1, y1 = t.bbox
+    words = page.get_text("words")          # (x0,y0,x1,y1,word,...)
+    left = [w for w in words if x0 - 95 <= w[2] <= x0 + 2 and y0 - 6 <= w[1] <= y1]
+    best = " ".join(w[4] for w in sorted(left, key=lambda w: (w[1], w[0])))
+    if not best:
+        above = [w for w in words
+                 if y0 - 26 <= w[3] <= y0 + 2 and w[2] >= x0 - 6 and w[0] <= x1]
+        best = " ".join(w[4] for w in sorted(above, key=lambda w: w[0]))
+    return _clean(best)[:40] or fallback
