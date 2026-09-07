@@ -826,10 +826,39 @@ elif step == 5:
                 side: [v for v in _s2.get(side, []) if v and v != "(비움)"]
                 for side in ("left", "right")
             }
-            # 3단계에서 만든 금융구조도 (PPT 가 있으면 PPT 우선 — 화질 손실 없음)
+            # ── 금융구조도 ────────────────────────────
+            # ★3단계에서 '미리보기 만들기' 를 안 눌렀거나 웹에서 그게 실패했으면
+            #   구조도가 아예 안 만들어져 결과물에서 빠졌다.
+            #   → 여기서 **채운 값으로 직접 만든다.** 버튼을 눌렀는지에 기대지 않는다.
+            if not (st.session_state.get("diag_bytes")
+                    or st.session_state.get("diag_png")):
+                _no2 = st.session_state.get("diag_no")
+                if _no2:
+                    try:
+                        _d2 = next((x for x in _diag_layouts()
+                                    if x["no"] == _no2), None)
+                        if _d2:
+                            _v2 = {f["key"]: st.session_state.get(
+                                       f"dv_{_no2}_{f['key']}", f["text"])
+                                   for f in _d2["fields"]}
+                            _r2 = {f["key"] for f in _d2["fields"]
+                                   if st.session_state.get(f"dx_{_no2}_{f['key']}")}
+                            _p2 = tempfile.NamedTemporaryFile(
+                                suffix=".pptx", delete=False).name
+                            _diag_build(_no2, _v2, _p2, removed=_r2)
+                            st.session_state["diag_pptx"] = _p2
+                            with open(_p2, "rb") as _bf2:
+                                st.session_state["diag_bytes"] = _bf2.read()
+                    except Exception as _e2:
+                        st.warning(f"금융구조도를 만들지 못했습니다 — {_e2}")
             data["_diagram"] = {"pptx": st.session_state.get("diag_pptx"),
                                 "pptx_bytes": st.session_state.get("diag_bytes"),
                                 "png": st.session_state.get("diag_png")}
+            if ("금융구조도" in data["_slots"]["left"]
+                    or "금융구조도" in data["_slots"]["right"]) and not (
+                    data["_diagram"]["pptx_bytes"] or data["_diagram"]["png"]):
+                st.warning("금융구조도를 넣도록 골랐지만 만들어진 구조도가 없습니다. "
+                           "3단계에서 구조도를 하나 고르고 항목을 채워 주세요.")
             # ★고른 '원본 표' 를 그대로 넘긴다(빌더가 원본 모양대로 그린다)
             data["_orig_tables"] = {
                 f"{t['key']} {t['title']}"[:46]: t
