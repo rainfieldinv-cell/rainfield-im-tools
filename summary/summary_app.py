@@ -489,6 +489,8 @@ elif step == 3:
             if _auto:
                 st.success(f"원본에서 {len(_auto)}개 항목을 찾아 미리 채웠습니다. 확인·수정하세요.")
 
+            # 그림과 입력칸을 **같은 높이**로 나란히 둔다
+            _IMG_H = 680
             _ic, _fc = st.columns([1.1, 1])
             with _ic:
                 _tp = _diag_thumb(_no)
@@ -499,7 +501,8 @@ elif step == 3:
             with _fc:
                 # ★입력칸만 따로 스크롤되게 한다. 그냥 두면 칸이 길어서 아래로
                 #   내리는 순간 왼쪽 그림이 화면 밖으로 나가 대조할 수가 없다.
-                _box = st.container(height=560, border=False)
+                #   높이는 왼쪽 그림과 같게 맞춘다(둘이 나란히 보여야 대조가 된다).
+                _box = st.container(height=_IMG_H, border=False)
             with _box:
                 for _f in _d["fields"]:
                     _k = _f["key"]

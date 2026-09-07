@@ -58,8 +58,8 @@ def _cell_style(cell, text, head=False):
 def _borders(cell):
     """회사 표와 **똑같은** 선 서식.
 
-    회사 틀을 뜯어보니 좌우 세로선은 아예 없고 위아래 가로선만 회색으로 긋는다.
-    내가 사방에 테두리를 그리는 바람에 다른 표들과 완전히 달라 보였다.
+    사방 모두 밝은 회색(A5A5A5) 0.5pt 로 통일한다.
+    칸마다 선 색·두께가 달라 보이던 것을 막는다.
     """
     tcPr = cell._tc.get_or_add_tcPr()
     tcPr.set("marL", "33513")
@@ -70,19 +70,31 @@ def _borders(cell):
     for tag in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
         for e in tcPr.findall(qn(tag)):
             tcPr.remove(e)
-    for tag in ("a:lnL", "a:lnR"):                   # 세로선 없음
-        ln = tcPr.makeelement(qn(tag), {"w": "12700", "cmpd": "sng"})
-        ln.append(ln.makeelement(qn("a:noFill"), {}))
-        tcPr.append(ln)
-    for tag in ("a:lnT", "a:lnB"):                   # 가로선만 회색
+    # ★사방 테두리를 **밝은 회색 A5A5A5 · 0.5pt** 로 통일(사용자 지시).
+    for tag in ("a:lnL", "a:lnR", "a:lnT", "a:lnB"):
         ln = tcPr.makeelement(qn(tag), {"w": "6350", "cap": "flat",
                                         "cmpd": "sng", "algn": "ctr"})
         fill = ln.makeelement(qn("a:solidFill"), {})
-        clr = fill.makeelement(qn("a:schemeClr"), {"val": "bg1"})
-        clr.append(clr.makeelement(qn("a:lumMod"), {"val": "65000"}))
-        fill.append(clr)
+        fill.append(fill.makeelement(qn("a:srgbClr"), {"val": "A5A5A5"}))
         ln.append(fill)
         tcPr.append(ln)
+
+
+def _no_style(tbl):
+    """표 스타일을 없앤다(색·줄무늬 제거). 선은 우리가 직접 긋는다."""
+    NO_STYLE = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"   # No Style, No Grid
+    tblPr = tbl._tbl.find(qn("a:tblPr"))
+    if tblPr is None:
+        tblPr = tbl._tbl.makeelement(qn("a:tblPr"), {})
+        tbl._tbl.insert(0, tblPr)
+    for e in tblPr.findall(qn("a:tableStyleId")):
+        tblPr.remove(e)
+    sid = tblPr.makeelement(qn("a:tableStyleId"), {})
+    sid.text = NO_STYLE
+    tblPr.append(sid)
+    for a in ("firstRow", "lastRow", "firstCol", "lastCol",
+              "bandRow", "bandCol"):
+        tblPr.set(a, "0")
 
 
 def _first_row_is_head(t):
@@ -105,6 +117,9 @@ def add_table(slide, t, left, top, width):
     tbl = shape.table
     tbl.first_row = False            # 파워포인트 기본 줄무늬·머리글 서식 끄기
     tbl.horz_banding = False
+    # ★새 표에는 파워포인트가 **기본 표 스타일**(파란 머리글·회색 줄무늬)을 붙인다.
+    #   그래서 색이 입혀져 나왔다. 스타일 자체를 '스타일 없음, 눈금 없음' 으로 바꾼다.
+    _no_style(tbl)
 
     # 열 너비 — 원본 표의 열 폭 비율을 그대로 따른다
     bbox = t.get("bbox")

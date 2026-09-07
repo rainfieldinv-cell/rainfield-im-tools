@@ -891,8 +891,14 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     if not _diag_png and _diag.get("pptx") and os.path.exists(_diag["pptx"]):
         try:
             from engine_bits import pptx_slide_png as _p2p
+            import diagram as _dgm
             _diag_png, _err = _p2p(_diag["pptx"], 1)
-            if not _diag_png:
+            if _diag_png:
+                # ★슬라이드 전체가 아니라 **구조도(상자·화살표)만** 잘라 쓴다.
+                #   전체를 넣으면 로고·제목·빈 여백까지 그림에 들어간다.
+                _diag_png = _dgm.crop_to_content(
+                    _diag_png, _dgm.content_bbox(_diag["pptx"]))
+            else:
                 print(f"[요약본] 구조도를 그림으로 못 바꿈: {_err}")
         except Exception as _de:
             print(f"[요약본] 구조도 그림 변환 실패: {_de}")

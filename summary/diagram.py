@@ -310,6 +310,63 @@ def insert_diagram(dst_slide, pptx_path: str):
     return dst_slide.shapes[-1]
 
 
+def content_bbox(pptx_path: str):
+    """구조도 슬라이드에서 **그림(구조도)만** 차지하는 네모를 인치로 준다.
+
+    로고·제목·바깥 액자는 뺀다. 슬라이드 전체를 사진으로 만들면 여백과 제목까지
+    들어가므로, 이 범위로 잘라내려고 쓴다.
+    반환: (x0, y0, x1, y1, 슬라이드폭, 슬라이드높이)  단위 인치. 없으면 None.
+    """
+    prs = Presentation(pptx_path)
+    src = prs.slides[0]
+    sw, sh_ = prs.slide_width, prs.slide_height
+    xs0 = ys0 = 10 ** 9
+    xs1 = ys1 = -10 ** 9
+    found = False
+    for shp in src.shapes:
+        try:
+            l, t = shp.left or 0, shp.top or 0
+            w, h = shp.width or 0, shp.height or 0
+        except Exception:
+            continue
+        if w <= 0 and h <= 0:
+            continue
+        if w > sw * 0.95:                       # 바깥 액자
+            continue
+        if shp.shape_type == 13 and t < Emu(int(0.6 * EMU_IN))                 and l < Emu(int(2.5 * EMU_IN)) and w < Emu(int(3.0 * EMU_IN)):
+            continue                            # 로고
+        if shp.has_text_frame and t < Emu(int(0.9 * EMU_IN))                 and l < Emu(int(1.5 * EMU_IN))                 and _TITLE_HEAD.match((shp.text_frame.text or "").strip()):
+            continue                            # 구조도 제목
+        found = True
+        xs0, ys0 = min(xs0, l), min(ys0, t)
+        xs1, ys1 = max(xs1, l + w), max(ys1, t + h)
+    if not found:
+        return None
+    pad = int(0.10 * EMU_IN)                    # 너무 딱 붙지 않게 약간 여백
+    xs0 = max(0, xs0 - pad)
+    ys0 = max(0, ys0 - pad)
+    xs1 = min(sw, xs1 + pad)
+    ys1 = min(sh_, ys1 + pad)
+    return (xs0 / EMU_IN, ys0 / EMU_IN, xs1 / EMU_IN, ys1 / EMU_IN,
+            sw / EMU_IN, sh_ / EMU_IN)
+
+
+def crop_to_content(png_bytes: bytes, box):
+    """슬라이드 사진에서 구조도 부분만 잘라낸다."""
+    if not png_bytes or not box:
+        return png_bytes
+    from PIL import Image
+    import io as _io
+    x0, y0, x1, y1, sw, sh_ = box
+    im = Image.open(_io.BytesIO(png_bytes))
+    W, H = im.size
+    c = im.crop((int(W * x0 / sw), int(H * y0 / sh_),
+                 int(W * x1 / sw), int(H * y1 / sh_)))
+    out = _io.BytesIO()
+    c.save(out, format="PNG")
+    return out.getvalue()
+
+
 def scale_tables_in_group(grp, ratio: float, min_pt: float = 4.5):
     """그룹을 줄일 때 따라오지 않는 것들을 직접 줄인다.
 
