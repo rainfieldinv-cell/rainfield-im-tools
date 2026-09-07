@@ -536,6 +536,10 @@ elif step == 3:
                                                          delete=False).name
                         _diag_build(_no, _vals, _p, removed=_rm)
                         st.session_state["diag_pptx"] = _p
+                        # ★경로만 들고 있으면 서버가 다시 뜰 때 임시파일이 사라져
+                        #   구조도가 조용히 빠진다 → 내용 자체를 보관한다.
+                        with open(_p, "rb") as _bf:
+                            st.session_state["diag_bytes"] = _bf.read()
                         _img, _err = pptx_slide_png(_p, 1)
                         st.session_state["diag_img"] = _img
                         st.session_state["diag_err"] = _err
@@ -588,6 +592,7 @@ elif step == 3:
                     _t.close()
                     if _suf == ".pptx":
                         st.session_state["diag_pptx"] = _t.name
+                        st.session_state["diag_bytes"] = _up2.getvalue()
                         _img, _err = pptx_slide_png(_t.name, 1)
                         st.session_state["diag_img"] = _img
                         st.session_state["diag_err"] = _err
@@ -646,7 +651,7 @@ elif step == 4:
         if EXTRA:
             OPTS += [_SEP] + EXTRA
         MISSING = [k for k, v in AVAIL.items() if not v]
-        if not (st.session_state.get("diag_pptx")
+        if not (st.session_state.get("diag_bytes")
                 or st.session_state.get("diag_png")):
             st.info("**금융구조도**는 목록에 있지만 아직 만들지 않았습니다. "
                     "3단계로 돌아가 만들면 그 자리에 들어갑니다. "
@@ -823,6 +828,7 @@ elif step == 5:
             }
             # 3단계에서 만든 금융구조도 (PPT 가 있으면 PPT 우선 — 화질 손실 없음)
             data["_diagram"] = {"pptx": st.session_state.get("diag_pptx"),
+                                "pptx_bytes": st.session_state.get("diag_bytes"),
                                 "png": st.session_state.get("diag_png")}
             # ★고른 '원본 표' 를 그대로 넘긴다(빌더가 원본 모양대로 그린다)
             data["_orig_tables"] = {

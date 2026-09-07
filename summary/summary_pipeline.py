@@ -888,6 +888,18 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     _diag = data.get("_diagram") or {}
     _diag_shape = None
     _diag_png = _diag.get("png")
+    # ★경로가 사라졌어도(서버 재시작·임시폴더 청소) 내용이 있으면 다시 만들어 쓴다.
+    #   구조도를 골랐는데 결과물에 아무것도 안 들어가던 원인.
+    if _diag.get("pptx_bytes") and not (
+            _diag.get("pptx") and os.path.exists(_diag["pptx"])):
+        try:
+            import tempfile as _tf
+            _tmp = _tf.NamedTemporaryFile(suffix=".pptx", delete=False)
+            _tmp.write(_diag["pptx_bytes"])
+            _tmp.close()
+            _diag["pptx"] = _tmp.name
+        except Exception as _te:
+            print(f"[요약본] 구조도 임시파일 만들기 실패: {_te}")
     if not _diag_png and _diag.get("pptx") and os.path.exists(_diag["pptx"]):
         try:
             from engine_bits import pptx_slide_png as _p2p
@@ -922,6 +934,12 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
             _diag_shape = _dgm.insert_diagram(s3, _diag["pptx"])
         except Exception as _de:
             print(f"[요약본] 금융구조도(PPT) 넣기 실패: {_de}")
+
+    if _diag_shape is None and any(
+            "금융구조도" in (_s.get(_side) or [])
+            for _s in (slots, slots2) for _side in ("left", "right")):
+        print("[요약본] 경고: 금융구조도를 골랐는데 넣을 구조도가 없습니다 "
+              "— 3단계에서 '미리보기 만들기' 를 눌러 구조도를 만들어 주세요.")
 
     def _blocks_of(slide):
         """그 슬라이드의 '항목명 → (라벨, 본문)' 지도.
