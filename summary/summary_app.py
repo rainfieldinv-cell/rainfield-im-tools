@@ -633,9 +633,9 @@ elif step == 4:
             "법인개요":     bool(data.get("법인개요")),
             "재무제표":     bool(data.get("재무제표")),
             "조감도":       bool(data.get("이미지_있음", True)),
-            # 3단계에서 만들었을 때만 뜬다(안 만들었으면 넣을 게 없다)
-            "금융구조도":   bool(st.session_state.get("diag_pptx")
-                                or st.session_state.get("diag_png")),
+            # ★금융구조도는 **항상** 목록에 둔다(필수 항목).
+            #   3단계에서 안 만들었으면 그 자리만 비고, 나머지는 그대로 만들어진다.
+            "금융구조도":   True,
         }
         # ★원본 IM 의 **표**를 그대로 고른다.
         #   글로 옮기면 요약본이 아니다 — 원문에 표로 돼 있으면 표를 넣는다.
@@ -646,6 +646,11 @@ elif step == 4:
         if EXTRA:
             OPTS += [_SEP] + EXTRA
         MISSING = [k for k, v in AVAIL.items() if not v]
+        if not (st.session_state.get("diag_pptx")
+                or st.session_state.get("diag_png")):
+            st.info("**금융구조도**는 목록에 있지만 아직 만들지 않았습니다. "
+                    "3단계로 돌아가 만들면 그 자리에 들어갑니다. "
+                    "안 만들면 그 자리만 비고 나머지는 정상으로 만들어집니다.")
         if _TBLS:
             st.caption(f"원본에서 표 **{len(_TBLS)}개**를 찾았습니다. "
                        "목록 아래쪽에서 고르면 그 표가 **원본 모양 그대로** 들어갑니다.")
