@@ -522,6 +522,19 @@ def normalize_bullets(slide):
                 _norm_paragraph(para)
 
 
+def _border(shape, rgb="000000", pt=0.75):
+    """그림에 얇은 검정 테두리(사용자 지시)."""
+    from pptx.oxml.ns import qn
+    spPr = shape._element.spPr
+    for e in spPr.findall(qn("a:ln")):
+        spPr.remove(e)
+    ln = spPr.makeelement(qn("a:ln"), {"w": str(int(pt * 12700))})
+    fill = ln.makeelement(qn("a:solidFill"), {})
+    fill.append(fill.makeelement(qn("a:srgbClr"), {"val": rgb}))
+    ln.append(fill)
+    spPr.append(ln)
+
+
 def build_highlight_preview(data: dict, out_path: str) -> str:
     """하이라이트 슬라이드 1장만 만든 PPTX(미리보기용)."""
     return build_summary(data, None, out_path, pages=1, _highlight_only=True)
@@ -870,21 +883,39 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     # ── ★3단계에서 만든 금융구조도 넣기 ───────────────
     #   PPT 로 만들었으면 도형째 옮긴다(웹 서버엔 파워포인트가 없어 그림으로 못 바꾼다).
     #   이미지로 받았으면 그림으로 넣는다.
+    #   PPT 를 도형째 옮기면 표가 안 줄어들어 겹치는 문제가 있었다.
+    #   사용자 지시대로 **그림으로 바꿔서** 넣는다(수정은 못 해도 모양이 정확하다).
+    #   그림에는 검정 얇은 테두리를 두른다.
     _diag = data.get("_diagram") or {}
     _diag_shape = None
-    if _diag.get("pptx") and os.path.exists(_diag["pptx"]):
+    _diag_png = _diag.get("png")
+    if not _diag_png and _diag.get("pptx") and os.path.exists(_diag["pptx"]):
         try:
+            from engine_bits import pptx_slide_png as _p2p
+            _diag_png, _err = _p2p(_diag["pptx"], 1)
+            if not _diag_png:
+                print(f"[요약본] 구조도를 그림으로 못 바꿈: {_err}")
+        except Exception as _de:
+            print(f"[요약본] 구조도 그림 변환 실패: {_de}")
+    if _diag_png:
+        try:
+            _diag_shape = s3.shapes.add_picture(
+                io.BytesIO(_diag_png), Inches(0.25), Inches(0.39),
+                width=Inches(4.90))
+            _diag_shape.name = "금융구조도"
+            _border(_diag_shape)
+            _lb = _clone_at_end(s3, _lbl_proto) if _lbl_proto is not None else None
+            if _lb is not None:
+                _replace_text_keep_runs(_lb.text_frame, "금융구조도")
+                _lb.name = "금융구조도라벨"
+        except Exception as _de:
+            print(f"[요약본] 금융구조도(이미지) 넣기 실패: {_de}")
+    elif _diag.get("pptx") and os.path.exists(_diag["pptx"]):
+        try:                       # 그림으로 못 바꾸면 도형째라도 넣는다
             import diagram as _dgm
             _diag_shape = _dgm.insert_diagram(s3, _diag["pptx"])
         except Exception as _de:
             print(f"[요약본] 금융구조도(PPT) 넣기 실패: {_de}")
-    elif _diag.get("png"):
-        try:
-            _diag_shape = s3.shapes.add_picture(
-                io.BytesIO(_diag["png"]), Inches(0.25), Inches(0.39),
-                width=Inches(4.90))
-        except Exception as _de:
-            print(f"[요약본] 금융구조도(이미지) 넣기 실패: {_de}")
 
     def _blocks_of(slide):
         """그 슬라이드의 '항목명 → (라벨, 본문)' 지도.
@@ -904,8 +935,10 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
             "조감도":       (None, pic),
             # 복제된 2페이지에도 같은 이름의 그룹이 생기므로 이름으로 찾는다
             # (s3 의 도형을 그대로 가리키면 2페이지에서 엉뚱한 걸 건드린다)
-            "금융구조도":   (None, next((sh for sh in slide.shapes
-                                        if sh.name == "금융구조도"), None)),
+            "금융구조도":   (next((sh for sh in slide.shapes
+                                    if sh.name == "금융구조도라벨"), None),
+                             next((sh for sh in slide.shapes
+                                   if sh.name == "금융구조도"), None)),
         }
         # 뒤에 붙인 '그 밖의 내용' 블록 — 만든 순서 = 표 순서.
         for _i, _k in enumerate(_extra_order):
