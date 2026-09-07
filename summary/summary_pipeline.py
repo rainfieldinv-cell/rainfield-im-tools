@@ -482,6 +482,46 @@ def _fix_cover_overlap(slide):
         pass
 
 
+# ── 글머리기호·줄맞춤 통일 ──────────────────────────
+#  틀의 칸들이 marL=0, indent=-342900 로 돼 있었다.
+#  이러면 첫 줄 글자는 불릿 뒤에서 시작하는데 **줄바꿈된 둘째 줄은 왼쪽 끝(0)으로
+#  돌아간다.** 그래서 칸마다 불릿 간격과 줄맞춤이 제각각으로 보였다.
+#  제대로 된 내어쓰기는 marL=한 칸, indent=-한 칸 이다.
+#    불릿 → 0 자리,  글자 → 한 칸 자리,  줄바꿈된 줄 → 같은 한 칸 자리
+_HANG = 228600          # 0.25인치 — 불릿과 글자 사이 간격(모든 칸 동일)
+
+
+def _norm_paragraph(para):
+    pPr = para._p.get_or_add_pPr()
+    has_bu = any(e.tag.endswith("}buChar") or e.tag.endswith("}buAutoNum")
+                 for e in pPr)
+    ind = pPr.get("indent")
+    try:
+        neg = int(ind) < 0 if ind is not None else False
+    except Exception:
+        neg = False
+    if has_bu or neg:
+        pPr.set("marL", str(_HANG))
+        pPr.set("indent", str(-_HANG))
+    else:
+        pPr.set("marL", "0")
+        pPr.set("indent", "0")
+
+
+def normalize_bullets(slide):
+    """이 슬라이드의 모든 표·글상자에서 불릿 간격과 줄맞춤을 같게 만든다."""
+    for sh in _walk(slide.shapes):
+        if sh.has_table:
+            t = sh.table
+            for r in range(len(t.rows)):
+                for c in range(len(t.columns)):
+                    for para in t.cell(r, c).text_frame.paragraphs:
+                        _norm_paragraph(para)
+        elif sh.has_text_frame:
+            for para in sh.text_frame.paragraphs:
+                _norm_paragraph(para)
+
+
 def build_highlight_preview(data: dict, out_path: str) -> str:
     """하이라이트 슬라이드 1장만 만든 PPTX(미리보기용)."""
     return build_summary(data, None, out_path, pages=1, _highlight_only=True)
@@ -913,6 +953,10 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         _arrange(s3b, slots2, "핵심요약 2/2")
     else:
         _arrange(s3, slots, "핵심요약")
+
+    # ★맨 마지막에 모든 장의 불릿 간격·줄맞춤을 같게 맞춘다.
+    for _sl in prs.slides:
+        normalize_bullets(_sl)
 
     prs.save(out_path)
     return out_path
