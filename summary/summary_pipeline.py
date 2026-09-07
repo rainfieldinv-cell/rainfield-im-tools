@@ -833,7 +833,7 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     #   없으면 기본 배치를 쓴다. 고른 것만 남기고 나머지 도형은 지운다.
     #   틀은 위치가 고정이라 표 행 수가 딜마다 달라지면 아래를 덮으므로,
     #   내용을 채운 뒤 실제 높이로 다시 쌓는다.
-    DEFAULT1 = {"left":  ["사모사채개요", "담보대출조건"],
+    DEFAULT1 = {"left":  ["사모사채개요", "담보대출조건", "금융구조도"],
                 "right": ["조감도", "사업일정", "법인개요", "재무제표"]}
     DEFAULT2 = {"left":  ["법인개요", "재무제표"], "right": []}
     slots = dict(data.get("_slots") or DEFAULT1)

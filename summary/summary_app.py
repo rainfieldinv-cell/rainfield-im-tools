@@ -523,9 +523,10 @@ elif step == 3:
                    if st.session_state.get(f"dx_{_no}_{f['key']}")}
 
             _g1, _g2 = st.columns(2)
-            if _g1.button("이대로 쓰기", type="primary", use_container_width=True,
-                          help="지금 채운 내용으로 구조도를 확정합니다. "
-                               "4단계에서 원하는 자리에 놓을 수 있습니다."):
+            if _g1.button("미리보기 만들기 (이대로 쓰기)", type="primary",
+                          use_container_width=True,
+                          help="지금 채운 내용으로 구조도를 만들어 **아래에 그림으로 "
+                               "보여줍니다.** 이 구조도가 4단계에서 요약본에 들어갑니다."):
                 with st.spinner("구조도를 만드는 중… (10초쯤 걸립니다)"):
                     try:
                         _p = tempfile.NamedTemporaryFile(suffix=".pptx",
@@ -554,12 +555,18 @@ elif step == 3:
                            disabled=True,
                            help="먼저 왼쪽 '이대로 쓰기' 를 눌러 구조도를 만들어 주세요.")
 
+            # ── 미리보기 자리는 **항상** 보인다 ──────────
+            #   전에는 버튼을 눌러야만 나타나서 '미리보기가 없다' 고 느꼈다.
+            st.markdown("##### 미리보기 — 완성된 구조도")
             if st.session_state.get("diag_err"):
-                st.warning(f"그림 미리보기를 만들지 못했습니다 — "
+                st.warning("미리보기를 만들지 못했습니다 — "
                            f"{st.session_state['diag_err']}")
             if st.session_state.get("diag_img"):
-                st.markdown("##### 완성된 구조도")
-                st.image(st.session_state["diag_img"], use_container_width=True)
+                st.image(st.session_state["diag_img"], use_container_width=True,
+                         caption="이 모습 그대로 요약본에 들어갑니다(검정 테두리 포함).")
+            elif not st.session_state.get("diag_err"):
+                st.info("위 **‘미리보기 만들기’** 를 누르면 완성된 구조도가 "
+                        "여기에 그림으로 보입니다. (10초쯤 걸립니다)")
 
             # ── ④ 직접 고친 것 올리기 ────────────────
             with st.expander("직접 고친 구조도 올리기 (선택)"):
@@ -652,7 +659,8 @@ elif step == 4:
             st.markdown("#### 1페이지 (첫째 장)")
 
         st.session_state.setdefault("slots", {
-            "left":  ["사모사채개요", "담보대출조건", "대출조건표"],
+            # 금융구조도는 기본으로 넣는다(3단계에서 만들었으면 자동으로 들어감)
+            "left":  ["사모사채개요", "담보대출조건", "금융구조도"],
             "right": ["조감도", "사업일정", "법인개요", "재무제표"],
         })
         st.session_state.setdefault("slots2", {"left": ["법인개요", "재무제표"],
