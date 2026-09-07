@@ -4,6 +4,7 @@
   build_summary(data, pdf_path, out_path, pages=1) -> out_path
 """
 import io, os, json, sys
+import datetime as _dt
 from copy import deepcopy
 
 # ── 경로 ─────────────────────────────────────────────
@@ -89,17 +90,16 @@ SYS = """당신은 부동산 금융 IM(투자설명서)을 읽고 '요약본 제
  "중요항목": [{"제목":..,"내용":["..",".."]}],
  "이미지_있음": {"금융구조도": false, "조감도": true, "위치도": false}
 }
-사업일정은 원문에 적힌 일정을 **전부** 담는다(개수 제한 없음).
+사업일정·재무제표 같은 표는 원본에서 그대로 읽으므로 여기서는 대충 채워도 된다.
 
-★"중요항목" — 위 고정 항목에 안 들어가는 원문 내용을 **여기에 빠짐없이** 담는다.
-  요약본에 넣을지는 사용자가 나중에 고르므로, 쓸 만한 건 일단 다 넣어라.
+★"중요항목" — ※표 안에 있는 내용은 담지 마라. 표는 원본에서 그대로 읽어 쓴다.
+  표가 아닌 **줄글 설명**만 여기에 담는다(없으면 빈 목록).
   (예: 분양·임대 현황, 인근 시세, 시공사 개요, 신용보강·안전장치, 자금수지,
    토지 확보 현황, 사업비·수지 분석, 조합원 현황, 임차인 현황, 감정평가 결과 등)
   - "제목"은 원문의 표·문단 제목을 그대로 쓴다(예: '인근 아파트 시세').
   - "내용"의 각 줄은 원문의 표를 옮길 때 "항목 : 값" 형태로 쓰고,
     표가 아닌 설명이면 문장 한 줄로 쓴다.
-  - 개수·줄 수 제한 없음. 원문에 있는 만큼 **전부** 담는다.
-  - 원문 문장을 줄여 쓰지 말고 그대로 옮긴다.
+  - 원문 문장을 줄여 쓰지 말고 그대로 옮긴다. 최대 6개.
 JSON 외 다른 말 금지."""
 
 
@@ -107,7 +107,7 @@ def extract_summary(pdf_bytes: bytes) -> dict:
     data = extract_from_pdf(pdf_bytes)
     full = "\n".join(data.get("pages_text", []))
     res = call_claude(SYS, f"[IM 원문]\n{full}", slide_num=801,
-                      pdf_context=full, prompt_version="summary_extract_v4")
+                      pdf_context=full, prompt_version="summary_extract_v5")
     if not res.get("ok"):
         raise RuntimeError(res.get("error") or "추출 실패")
     return res["data"]
@@ -439,6 +439,49 @@ def _stack(blocks, x_in, w_in, top_in, bottom_in, gap_in=0.16, label_gap_in=0.05
     return y / 914400.0
 
 
+def _fix_cover_overlap(slide):
+    """표지에서 제목이 길어 두 줄이 되면 아래 날짜 줄을 덮는 것을 막는다.
+
+    틀의 제목 글상자는 0.34in(한 줄)뿐인데 딜명이 길면 두 줄이 된다.
+    글상자는 커지지 않으므로 바로 아래 날짜 줄과 겹친다.
+    → 줄 수만큼 제목 상자를 키우고, 그 아래 글상자를 같은 만큼 내린다.
+    (그룹의 세로 배율이 1 이라 안쪽 좌표를 그대로 더하면 된다)
+    """
+    grp = next((sh for sh in slide.shapes if sh.shape_type == 6), None)
+    if grp is None:
+        return
+    title = date_box = None
+    for ch in grp.shapes:
+        if not ch.has_text_frame:
+            continue
+        t = (ch.text_frame.text or "")
+        if "제안서" in t or "요약본" in t:
+            title = ch
+        elif any(m in t for m in ("월", "20")) and len(t) < 30:
+            date_box = ch
+    if title is None:
+        return
+
+    lines = (title.text_frame.text or "").count(chr(10)) + 1
+    if lines < 2:
+        return
+    one = title.height or Inches(0.34)
+    extra = int(one * (lines - 1))
+    title.height = one + extra
+    if date_box is not None and (date_box.top or 0) > (title.top or 0):
+        date_box.top = (date_box.top or 0) + extra
+
+    # 그룹도 그만큼 키워야 아래 글상자가 그룹 밖으로 나가지 않는다
+    try:
+        from pptx.util import Emu as _E
+        xf = grp._element.find(".//" + _A + "xfrm")
+        ext = xf.find(_A + "ext"); che = xf.find(_A + "chExt")
+        ext.set("cy", str(int(ext.get("cy")) + extra))
+        che.set("cy", str(int(che.get("cy")) + extra))
+    except Exception:
+        pass
+
+
 def build_highlight_preview(data: dict, out_path: str) -> str:
     """하이라이트 슬라이드 1장만 만든 PPTX(미리보기용)."""
     return build_summary(data, None, out_path, pages=1, _highlight_only=True)
@@ -502,8 +545,14 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
     # 슬라이드 1 : 표지
     s1 = prs.slides[0]
     name = (data.get('deal_name') or '').strip()
-    _replace_contains(s1, "사업명(요약본)", f"{name} 사모사채 제안서(요약본)")
-    _replace_contains(s1, "몇월", data.get('date_ko', ''))
+    # 딜명과 '사모사채 제안서(요약본)' 은 줄을 나눈다(한 줄로 붙이면 아무 데서나 꺾인다).
+    _replace_contains(s1, "사업명(요약본)", name + chr(10) + "사모사채 제안서(요약본)")
+    # ★날짜는 원본에서 뽑지 않고 **만드는 날**을 쓴다. 원본 날짜를 읽으면 자꾸 틀렸다.
+    #   틀의 자리표시가 '몇월(영어 표시) 그해년도(2026)' 이고, 26장 변환기도
+    #   datetime.now().strftime("%B") 로 영문 월을 쓴다 → 같은 방식으로 맞춘다.
+    _now = _dt.datetime.now()
+    _replace_contains(s1, "몇월", f"{_now.strftime('%B')} {_now.year}")
+    _fix_cover_overlap(s1)
 
     # 슬라이드 2 : 하이라이트
     s2 = prs.slides[1]

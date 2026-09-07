@@ -101,7 +101,11 @@ def read_table(page, tbl):
             cells.append({"r": r, "c": c, "rs": 1, "cs": 1, "text": _clean(txt)})
 
     cells.sort(key=lambda x: (x["r"], x["c"]))
+    # 열 폭·행 높이 비율 — PPT 표를 원본과 같은 모양으로 그리는 데 쓴다
+    col_ratio = [round(xs[i + 1] - xs[i], 2) for i in range(n_col)]
+    row_ratio = [round(ys[i + 1] - ys[i], 2) for i in range(n_row)]
     return {"rows": n_row, "cols": n_col, "cells": cells,
+            "col_ratio": col_ratio, "row_ratio": row_ratio,
             "bbox": tuple(round(v, 1) for v in tbl.bbox)}
 
 
