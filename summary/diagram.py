@@ -310,6 +310,40 @@ def insert_diagram(dst_slide, pptx_path: str):
     return dst_slide.shapes[-1]
 
 
+def strip_chrome(pptx_path: str, out_path: str = None) -> str:
+    """로고·구조도 제목·바깥 액자를 지운 사본을 만든다.
+
+    사진으로 만들 때 이것들이 같이 찍히지 않게 하려는 것.
+    네모로 잘라내는 것만으로는 못 뺀다 — 긴 화살표가 로고보다 위(T 0.11)에서
+    시작해서, 그 위까지 포함해 잘라야 하기 때문이다.
+    """
+    import tempfile as _tf
+    prs = Presentation(pptx_path)
+    sl = prs.slides[0]
+    sw = prs.slide_width
+    for shp in list(sl.shapes):
+        try:
+            l, t = shp.left or 0, shp.top or 0
+            w = shp.width or 0
+        except Exception:
+            continue
+        drop = False
+        if w > sw * 0.95:                                   # 바깥 액자
+            drop = True
+        elif (shp.shape_type == 13 and t < Emu(int(0.6 * EMU_IN))
+              and l < Emu(int(2.5 * EMU_IN)) and w < Emu(int(3.0 * EMU_IN))):
+            drop = True                                     # 회사 로고
+        elif (shp.has_text_frame and t < Emu(int(0.9 * EMU_IN))
+              and l < Emu(int(1.5 * EMU_IN))
+              and _TITLE_HEAD.match((shp.text_frame.text or "").strip())):
+            drop = True                                     # 구조도 제목
+        if drop:
+            _drop(shp)
+    out = out_path or _tf.NamedTemporaryFile(suffix=".pptx", delete=False).name
+    prs.save(out)
+    return out
+
+
 def content_bbox(pptx_path: str):
     """구조도 슬라이드에서 **그림(구조도)만** 차지하는 네모를 인치로 준다.
 
@@ -362,6 +396,19 @@ def crop_to_content(png_bytes: bytes, box):
     W, H = im.size
     c = im.crop((int(W * x0 / sw), int(H * y0 / sh_),
                  int(W * x1 / sw), int(H * y1 / sh_)))
+    # ★위아래로 남는 흰 여백을 한 번 더 털어낸다.
+    #   화살표가 상자들보다 위에서 시작해 빈 공간이 크게 남는다.
+    try:
+        from PIL import ImageChops
+        bg = Image.new(c.mode, c.size, c.getpixel((0, 0)))
+        diff = ImageChops.difference(c, bg)
+        box2 = diff.convert("L").point(lambda v: 255 if v > 8 else 0).getbbox()
+        if box2:
+            m = 12                                   # 약간의 여백은 남긴다
+            c = c.crop((max(0, box2[0] - m), max(0, box2[1] - m),
+                        min(c.size[0], box2[2] + m), min(c.size[1], box2[3] + m)))
+    except Exception:
+        pass
     out = _io.BytesIO()
     c.save(out, format="PNG")
     return out.getvalue()
@@ -445,11 +492,21 @@ def build_diagram(no: int, values: dict, out_path: str, removed=None,
     prs = Presentation(layout or LAYOUT)
     keep = prs.slides[no - 1]
 
-    # 고른 것만 남기고 나머지 슬라이드는 버린다
+    # 고른 것만 남기고 나머지 슬라이드는 버린다.
+    # ★번호(sldId)만 빼면 슬라이드 알맹이가 파일에 그대로 남아
+    #   'Duplicate name: slide1.xml' 로 파일이 깨진다(파워포인트가 못 연다).
+    #   관계(rel)까지 끊어야 알맹이도 같이 빠진다.
     ids = list(prs.slides._sldIdLst)
     for i, sid in enumerate(ids):
         if i != no - 1:
+            rid = sid.get(
+                "{http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships}id")
             prs.slides._sldIdLst.remove(sid)
+            try:
+                prs.part.drop_rel(rid)
+            except Exception:
+                pass
 
     info = read_layouts(layout or LAYOUT)[no - 1]
 

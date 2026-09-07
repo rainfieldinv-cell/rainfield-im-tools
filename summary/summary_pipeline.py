@@ -892,12 +892,13 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         try:
             from engine_bits import pptx_slide_png as _p2p
             import diagram as _dgm
-            _diag_png, _err = _p2p(_diag["pptx"], 1)
+            # ★로고·제목·액자를 지운 사본으로 사진을 찍는다.
+            #   네모로 자르는 것만으론 못 뺀다(긴 화살표가 로고보다 위에서 시작).
+            _clean_pptx = _dgm.strip_chrome(_diag["pptx"])
+            _diag_png, _err = _p2p(_clean_pptx, 1)
             if _diag_png:
-                # ★슬라이드 전체가 아니라 **구조도(상자·화살표)만** 잘라 쓴다.
-                #   전체를 넣으면 로고·제목·빈 여백까지 그림에 들어간다.
                 _diag_png = _dgm.crop_to_content(
-                    _diag_png, _dgm.content_bbox(_diag["pptx"]))
+                    _diag_png, _dgm.content_bbox(_clean_pptx))
             else:
                 print(f"[요약본] 구조도를 그림으로 못 바꿈: {_err}")
         except Exception as _de:
