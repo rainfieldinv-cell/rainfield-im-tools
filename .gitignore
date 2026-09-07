@@ -19,3 +19,6 @@ summary/layout/*
 !summary/layout/구조도_분류.json
 !summary/layout/구조도_썸네일/
 !summary/layout/구조도_썸네일/*
+
+# 옛 폴더 보관용 — 저장소에 올리지 않는다(실제 딜 문서가 들어 있다)
+_예전자료/
