@@ -3,5 +3,5 @@ python-pptx
 PyMuPDF
 python-docx
 Pillow
-anthropic
+anthropic==0.105.2
 python-dotenv

@@ -141,13 +141,17 @@ def call_claude(
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=MAX_TOKENS,
-                temperature=0,
-                system=system_prompt,
-                messages=messages,
-            )
+            # ★anthropic 라이브러리가 올라가면서 temperature 를 안 받는 판이 있다
+            #   (1.4.0 에서 'unexpected keyword argument temperature' 로 앱이 죽었다).
+            #   못 받으면 그것만 빼고 다시 부른다.
+            _kw = dict(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS,
+                       system=system_prompt, messages=messages)
+            try:
+                response = client.messages.create(temperature=0, **_kw)
+            except TypeError as _te:
+                if "temperature" not in str(_te):
+                    raise
+                response = client.messages.create(**_kw)
         except Exception as exc:
             error_msg = str(exc)
             break
