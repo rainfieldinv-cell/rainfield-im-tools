@@ -106,13 +106,30 @@ def read_table(page, tbl):
             r2 = r
             while r2 + 1 < n_row and (r2 + 1, c) not in taken:
                 r2 += 1
-            try:
-                txt = page.crop((xs[c], ys[r], xs[c + 1], ys[r2 + 1]),
-                                strict=False).extract_text()
-            except Exception:
-                txt = ""
-            cells.append({"r": r, "c": c, "rs": r2 - r + 1, "cs": 1,
-                          "text": _clean(txt)})
+            # 줄마다 따로 잘라 본다.
+            #   전부 같은 글자 → 원래 하나였던 병합 칸
+            #   서로 다르면   → 줄마다 값이 있는 것(비고 열처럼) → 따로 넣는다
+            parts = []
+            for rr in range(r, r2 + 1):
+                try:
+                    parts.append(_clean(page.crop(
+                        (xs[c], ys[rr], xs[c + 1], ys[rr + 1]),
+                        strict=False).extract_text()))
+                except Exception:
+                    parts.append("")
+            uniq = {p for p in parts if p}
+            if len(uniq) <= 1:
+                try:
+                    txt = page.crop((xs[c], ys[r], xs[c + 1], ys[r2 + 1]),
+                                    strict=False).extract_text()
+                except Exception:
+                    txt = ""
+                cells.append({"r": r, "c": c, "rs": r2 - r + 1, "cs": 1,
+                              "text": _clean(txt)})
+            else:
+                for k, val in enumerate(parts):
+                    cells.append({"r": r + k, "c": c, "rs": 1, "cs": 1,
+                                  "text": val})
             r = r2 + 1
 
     cells.sort(key=lambda x: (x["r"], x["c"]))

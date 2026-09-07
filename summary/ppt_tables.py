@@ -122,8 +122,31 @@ def add_table(slide, t, left, top, width):
             col.width = int(width / n_c)
 
     head = _first_row_is_head(t)
-    for row in tbl.rows:
-        row.height = row_h
+
+    # ★행 높이를 글자 양에 맞춰 잡는다.
+    #   전부 같은 높이로 두면 글 많은 칸이 자기 행을 넘어 아래로 흐른다
+    #   (사업수지 '비고' 글자가 한 덩어리로 몰리던 원인).
+    #   병합된 칸의 글은 그 칸이 걸친 행 수로 나눠 셈한다.
+    col_in = [(c.width or 0) / 914400.0 for c in tbl.columns]
+    need = [0.0] * n_r
+    for c in t["cells"]:
+        txt = c["text"] or ""
+        if not txt:
+            continue
+        w = sum(col_in[c["c"]: c["c"] + c["cs"]]) or 1.0
+        cpl = max(1.0, (w - 0.12) * 72.0 / FONT_PT)
+        lines = 0
+        for ln in txt.split(chr(10)):
+            u = 0.0
+            for ch in ln:
+                u += 1.0 if ("가" <= ch <= "힣" or "一" <= ch <= "鿿") else 0.55
+            lines += max(1, int(-(-u // cpl)))
+        h = max(1, lines) * FONT_PT * 1.30 / 72.0 + 0.06
+        per = h / max(1, c["rs"])
+        for rr in range(c["r"], min(c["r"] + c["rs"], n_r)):
+            need[rr] = max(need[rr], per)
+    for i, row in enumerate(tbl.rows):
+        row.height = Emu(int(max(0.20, need[i]) * 914400))
 
     filled = set()
     for c in sorted(t["cells"], key=lambda x: (x["r"], x["c"])):
