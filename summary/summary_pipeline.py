@@ -845,6 +845,28 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
 
     _FIXED_N = 6      # 틀에 원래 있는 표 6개(L, TR, F, C, B, SC)
 
+    # ── ★원본 IM 의 표를 그대로 그린다 ─────────────────
+    #   글로 옮기면 요약본이 아니다. 원문에 표로 돼 있으면 표를 넣는다.
+    #   슬라이드 복제 전에 만들어야 2페이지에서도 같은 표를 쓸 수 있다.
+    _orig = data.get("_orig_tables") or {}
+    _orig_order = []
+    if _orig:
+        _want = {k for _s in (slots, slots2)
+                 for _side in ("left", "right") for k in (_s.get(_side) or [])}
+        try:
+            import ppt_tables as _pt
+            for _name, _t in _orig.items():
+                if _want and _name not in _want:
+                    continue
+                _lb = None
+                if _lbl_proto is not None:
+                    _lb = _clone_at_end(s3, _lbl_proto)
+                    _replace_text_keep_runs(_lb.text_frame, _t.get("title") or _name)
+                _pt.add_table(s3, _t, Inches(0.25), Inches(0.39), Inches(4.90))
+                _orig_order.append(_name)
+        except Exception as _oe:
+            print(f"[요약본] 원본 표 그리기 실패: {_oe}")
+
     # ── ★3단계에서 만든 금융구조도 넣기 ───────────────
     #   PPT 로 만들었으면 도형째 옮긴다(웹 서버엔 파워포인트가 없어 그림으로 못 바꾼다).
     #   이미지로 받았으면 그림으로 넣는다.
@@ -889,6 +911,12 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         for _i, _k in enumerate(_extra_order):
             _ti = _FIXED_N + _i
             m[_k] = (_find_label(slide, _k), ts[_ti] if _ti < len(ts) else None)
+        # 원본에서 그대로 옮긴 표 — 그 뒤에 순서대로 붙어 있다.
+        _base = _FIXED_N + len(_extra_order)
+        for _i, _k in enumerate(_orig_order):
+            _ti = _base + _i
+            _ttl = (_orig.get(_k) or {}).get("title") or _k
+            m[_k] = (_find_label(slide, _ttl), ts[_ti] if _ti < len(ts) else None)
         return m
 
     def _arrange(slide, sl, tag):

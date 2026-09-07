@@ -26,6 +26,20 @@ import diagram as _dg                                              # noqa: E402
 STEP_NAMES = ["원본 업로드", "하이라이트", "금융구조도", "내용 배치", "생성"]
 
 
+# ── 원본 표 읽기 ────────────────────────────────────
+@st.cache_data(show_spinner="원본에서 표를 찾는 중...")
+def _orig_tables(pdf_bytes):
+    """원본 IM 에 들어 있는 표 목록. 같은 원본이면 한 번만 읽는다."""
+    if not pdf_bytes:
+        return []
+    try:
+        import pdf_tables as _pt
+        return _pt.read_pdf_tables(pdf_bytes, max_tables=80)
+    except Exception as e:
+        print(f"[표읽기] 실패: {e}")
+        return []
+
+
 # ── 3단계(금융구조도) 도우미 ─────────────────────────
 @st.cache_data(show_spinner=False)
 def _diag_layouts():
@@ -613,13 +627,18 @@ elif step == 4:
             "금융구조도":   bool(st.session_state.get("diag_pptx")
                                 or st.session_state.get("diag_png")),
         }
-        # ★목록은 '기본 7항목' 을 위에, 원본에서 찾은 그 밖의 내용을 그 아래에.
-        _SEP = "──── 원본의 그 밖의 내용 ────"      # 고르면 (비움)으로 친다
-        EXTRA = [t for t, _p in extra_blocks_of(data)]
+        # ★원본 IM 의 **표**를 그대로 고른다.
+        #   글로 옮기면 요약본이 아니다 — 원문에 표로 돼 있으면 표를 넣는다.
+        _SEP = "──── 원본에 있는 표 ────"           # 고르면 (비움)으로 친다
+        _TBLS = _orig_tables(st.session_state.get("_pdf_bytes"))
+        EXTRA = [f"{t['key']} {t['title']}"[:46] for t in _TBLS]
         OPTS = ["(비움)"] + [k for k, v in AVAIL.items() if v]
         if EXTRA:
             OPTS += [_SEP] + EXTRA
         MISSING = [k for k, v in AVAIL.items() if not v]
+        if _TBLS:
+            st.caption(f"원본에서 표 **{len(_TBLS)}개**를 찾았습니다. "
+                       "목록 아래쪽에서 고르면 그 표가 **원본 모양 그대로** 들어갑니다.")
 
         # ── 페이지 수 먼저 고른다(1장이냐 2장이냐에 따라 아래 배치가 달라짐) ──
         st.session_state.setdefault("pages", 1)
@@ -789,6 +808,11 @@ elif step == 5:
             # 3단계에서 만든 금융구조도 (PPT 가 있으면 PPT 우선 — 화질 손실 없음)
             data["_diagram"] = {"pptx": st.session_state.get("diag_pptx"),
                                 "png": st.session_state.get("diag_png")}
+            # ★고른 '원본 표' 를 그대로 넘긴다(빌더가 원본 모양대로 그린다)
+            data["_orig_tables"] = {
+                f"{t['key']} {t['title']}"[:46]: t
+                for t in _orig_tables(st.session_state.get("_pdf_bytes"))
+            }
             with st.spinner("요약본을 만드는 중..."):
                 try:
                     tf = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
