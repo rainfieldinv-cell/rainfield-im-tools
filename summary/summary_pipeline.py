@@ -923,6 +923,10 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
                 if _lbl_proto is not None:
                     _lb = _clone_at_end(s3, _lbl_proto)
                     _replace_text_keep_runs(_lb.text_frame, _t.get("title") or _name)
+                    # ★이름표를 단다. 글자로 찾으면 틀에 원래 있던 '사업일정' 라벨이
+                    #   먼저 잡혀서, 새로 만든 라벨이 제 표를 못 찾고 슬라이드 한복판에
+                    #   그대로 남아 오른쪽 표를 덮었다.
+                    _lb.name = f"원본표라벨{len(_orig_order)}"
                 _pt.add_table(s3, _t, Inches(0.25), Inches(0.39), Inches(4.90))
                 _orig_order.append(_name)
         except Exception as _oe:
@@ -1021,8 +1025,10 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         _base = _FIXED_N + len(_extra_order)
         for _i, _k in enumerate(_orig_order):
             _ti = _base + _i
-            _ttl = (_orig.get(_k) or {}).get("title") or _k
-            m[_k] = (_find_label(slide, _ttl), ts[_ti] if _ti < len(ts) else None)
+            # 라벨은 **이름**으로 찾는다(글자로 찾으면 틀의 같은 이름 라벨이 먼저 잡힌다).
+            _nm = f"원본표라벨{_i}"
+            m[_k] = (next((sh for sh in slide.shapes if sh.name == _nm), None),
+                     ts[_ti] if _ti < len(ts) else None)
         return m
 
     def _arrange(slide, sl, tag):
