@@ -1,3 +1,0 @@
-libreoffice-impress
-fonts-nanum
-poppler-utils
