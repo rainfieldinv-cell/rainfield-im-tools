@@ -170,7 +170,8 @@ def _pptx_png_soffice(pptx_path: str, slide_no: int = 1, zoom: float = 2.0):
     """LibreOffice 로 PPTX → PDF → PNG. 웹(리눅스 서버)에서 쓰는 길.
 
     회사 공용 웹에는 파워포인트가 없어 미리보기가 안 나왔다.
-    packages.txt 에 libreoffice 가 있으므로 이걸로 만든다.
+    packages.txt 의 libreoffice-impress 가 넣어주는 soffice 로 만든다.
+    (예전엔 libreoffice 통짜를 적었는데 너무 커서 웹 설치가 통째로 실패했다)
     """
     import os as _os
     import shutil as _sh
