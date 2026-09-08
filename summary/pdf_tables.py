@@ -54,6 +54,192 @@ def _clean(s):
     return "\n".join(ln.strip() for ln in s.split("\n")).strip()
 
 
+def _line_cover(page, x0, x1):
+    """가로선을 y 자리별로 묶어, 표 폭을 얼마나 덮는지 비율(0~1)로 준다.
+
+    한 줄이 여러 조각으로 그려져 있어(칸마다 따로) 조각 하나만 보면
+    '짧은 선' 으로 보인다. 겹치는 구간을 합쳐서 재야 한다.
+    """
+    W = max(1.0, x1 - x0)
+    by = {}
+    for e in page.horizontal_edges:
+        a, b = max(x0, e["x0"]), min(x1, e["x1"])
+        if b - a <= 1:
+            continue
+        by.setdefault(round(e["top"] / 1.5), []).append((a, b))
+    out = {}
+    for key, segs in by.items():
+        segs.sort()
+        cov, cur = 0.0, None
+        for a, b in segs:
+            if cur is None or a > cur[1]:
+                if cur:
+                    cov += cur[1] - cur[0]
+                cur = [a, b]
+            else:
+                cur[1] = max(cur[1], b)
+        if cur:
+            cov += cur[1] - cur[0]
+        out[key * 1.5] = cov / W
+    return out
+
+
+def _vlines_in(page, y_top, y_bot):
+    """그 띠를 절반 넘게 지나는 세로선들의 x 목록."""
+    band = max(1.0, y_bot - y_top)
+    out = []
+    for e in page.vertical_edges:
+        if min(y_bot, e["bottom"]) - max(y_top, e["top"]) >= band * 0.5:
+            out.append(e["x0"])
+    return out
+
+
+def _header_cells(page, xs, y_top, y_bot):
+    """머리글 줄을 칸으로 만들어 준다.
+
+    ★반드시 칸을 박아 넣어야 한다. 빈자리로 두면 아래 '빈자리 채우기' 가
+      머리글부터 본문 끝까지 한 칸으로 이어 붙인다('비 고' 가 9줄을 먹던 원인).
+    세로선이 없는 자리는 원본에서 이어진 칸이므로 그대로 이어 붙인다.
+    """
+    n_col = len(xs) - 1
+    vx = _vlines_in(page, y_top, y_bot)
+    out, c = [], 0
+    while c < n_col:
+        c2 = c
+        while c2 + 1 < n_col and not any(abs(x - xs[c2 + 1]) <= 6 for x in vx):
+            c2 += 1
+        try:
+            txt = page.crop((xs[c], y_top, xs[c2 + 1], y_bot),
+                            strict=False).extract_text() or ""
+        except Exception:
+            txt = ""
+        out.append({"r": 0, "c": c, "rs": 1, "cs": c2 - c + 1,
+                    "text": _clean(txt)})
+        c = c2 + 1
+    return out
+
+
+def _has_col_lines(page, xs, y_top, y_bot):
+    """그 띠 안에 표의 **열 경계선**이 실제로 그어져 있나.
+
+    머리글 줄인지, 표 위에 얹힌 설명글인지 가르는 잣대다.
+    ('▪ 토지 확보현황 : 96.9% ...', '(단위:억원)' 같은 줄을 머리글로
+     잘못 삼아 표에 끌어들이던 것을 막는다.)
+    """
+    inner = xs[1:-1]
+    if not inner:
+        return False
+    band = max(1.0, y_bot - y_top)
+    hit = 0
+    for x in inner:
+        for e in page.vertical_edges:
+            if abs(e["x0"] - x) > 6:
+                continue
+            if min(y_bot, e["bottom"]) - max(y_top, e["top"]) >= band * 0.5:
+                hit += 1
+                break
+    return hit >= max(1, (len(inner) + 1) // 2)
+
+
+def _header_above(page, xs, ys):
+    """표 바로 위에 붙어 있는 **머리글 줄**을 찾아 그 윗선 y 를 준다.
+
+    돈암동 사업일정 표가 이랬다. 머리글(구분/일정/내용/비고)이 본문과
+    0.5pt 떨어져 그려져 있어 find_tables 가 다른 덩어리로 보고 통째로 버렸다
+    (본문만 '17.04 부터 시작하는 표로 잡힘).
+    """
+    x0, x1, top = xs[0], xs[-1], ys[0]
+    gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    h = sorted(gaps)[len(gaps) // 2] if gaps else 12.0
+    cover = _line_cover(page, x0, x1)
+    # ★0.95 로 본다. 0.8 로 잡으면 칸마다 그려진 **글자 배경 상자**의 밑선
+    #   (사업일정 머리글 안쪽 상자, 폭의 90%)까지 진짜 줄로 쳐서 막혀 버린다.
+    FULL = 0.95
+    cand = [y for y, c in cover.items()
+            if c >= FULL and top - 3.0 * h <= y <= top - 3.0]
+    if not cand:
+        return None
+    y = max(cand)
+    # 머리글과 본문 사이에 또 다른 줄이 있으면 '한 줄' 이 아니다
+    if any(y + 2 < z < top - 2 and c >= FULL for z, c in cover.items()):
+        return None
+    if not _has_col_lines(page, xs, y, top):
+        return None
+    try:
+        txt = page.crop((x0, y, x1, top), strict=False).extract_text() or ""
+    except Exception:
+        txt = ""
+    return y if txt.strip() else None
+
+
+def _restore_merges(page, xs, ys, cells, bbox):
+    """원본에 **한 칸으로 그려진 상자**를 보고, 쪼개진 칸을 도로 합친다.
+
+    돈암동 사업일정의 '진행 경과' 는 6줄을 합친 한 칸인데, 그 안에 글자마다
+    작은 상자가 또 그려져 있다. pdfplumber 는 그 작은 상자의 선까지 격자로 쳐서
+    '진행' 과 '경과' 를 다른 줄로 갈라 놓았다.
+    바깥 상자만 보면 원래 한 칸이라는 것을 알 수 있다.
+    """
+    n_col, n_row = len(xs) - 1, len(ys) - 1
+    bx0, by0, bx1, by1 = bbox
+    boxes = []
+    for r in page.rects:
+        a, b, c, d = r["x0"], r["top"], r["x1"], r["bottom"]
+        if c - a < 3 or d - b < 3:                 # 선처럼 납작한 것은 상자가 아니다
+            continue
+        if a < bx0 - 3 or c > bx1 + 3 or b < by0 - 3 or d > by1 + 3:
+            continue
+        boxes.append((a, b, c, d))
+    if not boxes or len(boxes) > 400:              # 도형이 수만 개인 문서에서 멈추지 않게
+        return cells
+
+    # 다른 상자 **안에** 들어 있는 상자는 글자 배경이다 → 바깥 것만 남긴다
+    outer = []
+    for i, (a, b, c, d) in enumerate(boxes):
+        inner = False
+        for j, (p, q, r2, s) in enumerate(boxes):
+            if j == i:
+                continue
+            if (p <= a + 1 and q <= b + 1 and r2 >= c - 1 and s >= d - 1
+                    and (r2 - p) * (s - q) > (c - a) * (d - b) + 1):
+                inner = True
+                break
+        if not inner:
+            outer.append((a, b, c, d))
+
+    spans = []
+    for (a, b, c, d) in outer:
+        c0, c1 = _idx(a, xs), _idx(c, xs)
+        r0, r1 = _idx(b, ys), _idx(d, ys)
+        cs, rs = c1 - c0, r1 - r0
+        if rs <= 1 and cs <= 1:
+            continue
+        if rs >= n_row and cs >= n_col:            # 표 전체 테두리
+            continue
+        if abs(xs[c0] - a) > 3 or abs(xs[min(c1, n_col)] - c) > 3:
+            continue                               # 격자에 안 맞으면 건너뛴다
+        if abs(ys[r0] - b) > 3 or abs(ys[min(r1, n_row)] - d) > 3:
+            continue
+        spans.append((r0, c0, min(rs, n_row - r0), min(cs, n_col - c0),
+                      (a, b, c, d)))
+    if not spans:
+        return cells
+
+    covered = set()
+    for r0, c0, rs, cs, _ in spans:
+        for rr in range(r0, r0 + rs):
+            for cc in range(c0, c0 + cs):
+                covered.add((rr, cc))
+    out = [c for c in cells if (c["r"], c["c"]) not in covered]
+    for r0, c0, rs, cs, box in spans:
+        try:
+            txt = page.crop(box, strict=False).extract_text() or ""
+        except Exception:
+            txt = ""
+        out.append({"r": r0, "c": c0, "rs": rs, "cs": cs, "text": _clean(txt)})
+    return out
+
+
 def read_table(page, tbl):
     """표 하나를 {rows, cols, cells:[{r,c,rs,cs,text}]} 로 만든다."""
     rects = [c for c in tbl.cells if c]
@@ -66,6 +252,12 @@ def read_table(page, tbl):
           if i == 0 or i == len(xs) - 1 or xs[i + 1] - v > 3.0]
     ys = [v for i, v in enumerate(ys)
           if i == 0 or i == len(ys) - 1 or ys[i + 1] - v > 3.0]
+    if len(xs) - 1 < _MIN_COLS or len(ys) - 1 < _MIN_ROWS:
+        return None
+    # ★머리글 줄이 따로 떨어져 있으면 끌어와서 첫 줄로 붙인다
+    _head = _header_above(page, xs, ys)
+    if _head is not None:
+        ys = [_head] + ys
     n_col, n_row = len(xs) - 1, len(ys) - 1
     if n_row < _MIN_ROWS or n_col < _MIN_COLS:
         return None
@@ -86,6 +278,15 @@ def read_table(page, tbl):
                       "cs": min(cs, n_col - c0), "text": _clean(txt)})
     if not cells:
         return None
+
+    # ★끌어온 머리글 줄은 칸으로 박아 넣는다(빈자리로 두면 아래로 이어 붙는다)
+    if _head is not None:
+        cells += _header_cells(page, xs, ys[0], ys[1])
+
+    # ★원본에 한 칸으로 그려진 상자를 보고 쪼개진 칸을 도로 합친다.
+    #   (빈자리 채우기보다 **먼저** 해야 한다. 안 그러면 줄마다 잘라 넣은 뒤라
+    #    '진행' / '경과' 가 이미 다른 줄로 굳어 버린다.)
+    cells = _restore_merges(page, xs, ys, cells, tbl.bbox)
 
     # ★칸 사각형이 아예 없는 자리(=선이 덜 그려진 열)도 글자를 뽑는다.
     #   돈암동 사업수지의 '비고' 열이 통째로 비어 나오던 원인이 이것이다.
