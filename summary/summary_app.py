@@ -27,74 +27,17 @@ STEP_NAMES = ["원본 업로드", "하이라이트", "금융구조도", "내용 
 
 
 # ── 원본 표 읽기 ────────────────────────────────────
-#  두 가지 방법이 있다.
-#    빠르게  : 표의 선을 보고 격자를 만든다(pdfplumber·PyMuPDF). 몇 초면 끝난다.
-#    꼼꼼하게: Docling — 표 생김새를 배운 모델이 칸을 잡는다. 선이 흐리거나 없는
-#              표까지 찾지만 훨씬 느리고, 설치가 커서 **내 컴퓨터에서만** 된다.
-@st.cache_data(show_spinner=False)
-def _orig_tables(pdf_bytes, engine="fast"):
-    """원본 IM 에 들어 있는 표 목록. 같은 원본·같은 방법이면 한 번만 읽는다.
-
-    반환: (표목록, 알림글)
-    """
+@st.cache_data(show_spinner="원본에서 표를 찾는 중...")
+def _orig_tables(pdf_bytes):
+    """원본 IM 에 들어 있는 표 목록. 같은 원본이면 한 번만 읽는다."""
     if not pdf_bytes:
-        return [], ""
-    if engine == "docling":
-        try:
-            import docling_tables as _dl
-            tabs, msg = _dl.read_tables(pdf_bytes, max_tables=80)
-            if tabs:
-                return tabs, msg
-            return [], (msg or "Docling이 표를 찾지 못했습니다.") + " 빠른 방법으로 대신 읽습니다."
-        except Exception as e:
-            print(f"[표읽기] Docling 실패: {e}")
-            return [], f"Docling을 쓰지 못했습니다({type(e).__name__}). 빠른 방법으로 대신 읽습니다."
+        return []
     try:
         import pdf_tables as _pt
-        return _pt.read_pdf_tables(pdf_bytes, max_tables=80), ""
+        return _pt.read_pdf_tables(pdf_bytes, max_tables=80)
     except Exception as e:
         print(f"[표읽기] 실패: {e}")
-        return [], f"표를 읽지 못했습니다 — {e}"
-
-
-def _read_tables(pdf_bytes):
-    """고른 방법으로 표를 읽는다. Docling 이 빈손이면 빠른 방법으로 되돌린다."""
-    engine = st.session_state.get("tbl_engine", "fast")
-    tabs, note = _orig_tables(pdf_bytes, engine)
-    if engine == "docling" and not tabs:
-        tabs, _ = _orig_tables(pdf_bytes, "fast")
-    return tabs, note
-
-
-def _docling_ok():
-    try:
-        import docling_tables as _dl
-        return _dl.available()
-    except Exception:
-        return False
-
-
-_ENGINE_LABEL = {"fast": "빠르게 (기본)", "docling": "꼼꼼하게 (Docling)"}
-
-
-def _render_engine_picker():
-    """원본 표를 어떤 방법으로 읽을지 고르는 칸."""
-    st.session_state.setdefault("tbl_engine", "fast")
-    if not _docling_ok():
-        st.session_state["tbl_engine"] = "fast"
-        return
-    st.radio("원본 표를 읽는 방법", ["fast", "docling"], horizontal=True,
-             format_func=lambda k: _ENGINE_LABEL[k], key="tbl_engine")
-    if st.session_state["tbl_engine"] == "docling":
-        st.caption(
-            "**꼼꼼하게** — 표 모양을 학습한 프로그램(Docling)이 칸을 잡습니다. "
-            "테두리가 흐리거나 아예 없는 표까지 찾아냅니다. "
-            "대신 원본 한 건에 **1~3분** 걸립니다(한 번 읽은 원본은 그 뒤로 바로 나옵니다). "
-            "이 방법은 회사 공용 웹 주소에서는 쓸 수 없고, "
-            "이 컴퓨터에서 켠 화면에서만 나옵니다.")
-    else:
-        st.caption("**빠르게** — 표의 테두리 선을 보고 칸을 나눕니다. 몇 초면 끝납니다. "
-                   "표를 놓치거나 칸이 어긋나면 '꼼꼼하게'로 바꿔 보세요.")
+        return []
 
 
 # ── 3단계(금융구조도) 도우미 ─────────────────────────
@@ -716,11 +659,7 @@ elif step == 4:
         # ★원본 IM 의 **표**를 그대로 고른다.
         #   글로 옮기면 요약본이 아니다 — 원문에 표로 돼 있으면 표를 넣는다.
         _SEP = "──── 원본에 있는 표 ────"           # 고르면 (비움)으로 친다
-        _render_engine_picker()
-        with st.spinner("원본에서 표를 찾는 중..."):
-            _TBLS, _TNOTE = _read_tables(st.session_state.get("_pdf_bytes"))
-        if _TNOTE:
-            st.warning(_TNOTE)
+        _TBLS = _orig_tables(st.session_state.get("_pdf_bytes"))
         EXTRA = [f"{t['key']} {t['title']}"[:46] for t in _TBLS]
         OPTS = ["(비움)"] + [k for k, v in AVAIL.items() if v]
         if EXTRA:
@@ -944,7 +883,7 @@ elif step == 5:
             # ★고른 '원본 표' 를 그대로 넘긴다(빌더가 원본 모양대로 그린다)
             data["_orig_tables"] = {
                 f"{t['key']} {t['title']}"[:46]: t
-                for t in _read_tables(st.session_state.get("_pdf_bytes"))[0]
+                for t in _orig_tables(st.session_state.get("_pdf_bytes"))
             }
             with st.spinner("요약본을 만드는 중..."):
                 try:
