@@ -1,2 +1,0 @@
-fonts-nanum
-poppler-utils
