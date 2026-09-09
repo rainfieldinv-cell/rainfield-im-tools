@@ -10,6 +10,12 @@ import streamlit as st
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+# 파일 올리기 안내문 — 변환기와 같은 것을 쓴다(IM 폴더 맨 위 upload_guide.py).
+#   도구는 자기 폴더만 파이썬 경로에 올라오므로, 윗폴더를 직접 넣어 준다.
+_IM_ROOT = os.path.dirname(_HERE)
+if _IM_ROOT not in sys.path:
+    sys.path.insert(0, _IM_ROOT)
+from upload_guide import render_upload_guide as _render_upload_guide   # noqa: E402
 
 from summary_pipeline import (extract_summary, build_summary,      # noqa: E402
                               build_highlight_preview, highlights_from_pages)
@@ -199,6 +205,7 @@ if step == 1:
     st.markdown("### 1단계 · 원본 IM 업로드")
     st.caption("PDF를 올리면 원본을 읽어 핵심 데이터를 자동으로 뽑습니다. "
                "처음 보는 원본은 1분 남짓 걸리고, 같은 원본은 즉시 나옵니다.")
+    _render_upload_guide()      # 스캔본·글자가 그림인 PDF 주의 · 워드를 PDF로 저장하는 법
     up = st.file_uploader("원본 IM PDF", type=["pdf"])
 
     if up is not None and st.session_state.get("_pdf_name") != up.name:

@@ -1,5 +1,14 @@
 import streamlit as st
 
+# 파일 올리기 안내문 — 변환기·요약본이 같은 것을 쓴다(IM 폴더 맨 위 upload_guide.py).
+#   도구는 자기 폴더만 파이썬 경로에 올라오므로, 윗폴더를 직접 넣어 준다.
+import os as _os
+import sys as _sys
+_IM_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _IM_ROOT not in _sys.path:
+    _sys.path.insert(0, _IM_ROOT)
+from upload_guide import render_upload_guide as _render_upload_guide
+
 # 추출 함수 및 UI 컴포넌트 불러오기
 from extractors import extract_from_pdf, extract_from_docx, detect_business_name, get_file_type
 from ui_components import render_stepper, render_image_gallery, render_text_preview
@@ -172,6 +181,7 @@ def show_step1():
         "<span style='color:gray; font-size:13px;'>(PDF / Word(.doc·.docx) 지원 · PDF 우선)</span>",
         unsafe_allow_html=True,
     )
+    _render_upload_guide()          # 스캔본·글자가 그림인 PDF 주의 · 워드를 PDF로 저장하는 법
     st.markdown("")
 
     # 파일 업로더 (PDF 우선 — PDF 있으면 PDF로 전부 처리, 없으면 워드를 PDF로 변환)
