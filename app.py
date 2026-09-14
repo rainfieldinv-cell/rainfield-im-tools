@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """레인필드 IM 도구 — 처음 화면.
 
-IM 관련 도구 두 개를 한 주소에서 쓴다. (계약서 도구와 같은 방식)
-  📑 IM 변환기  → convert/app.py       원본 IM(PDF) → 회사 양식 제안서 전체
-  📄 IM 요약본  → summary/summary_app.py  원본 IM(PDF) → 4~5장 요약본
+IM 관련 도구 세 개를 한 주소에서 쓴다. (계약서 도구와 같은 방식)
+  📑 IM 변환기      → convert/app.py          원본 IM(PDF) → 회사 양식 제안서 전체
+  📄 IM 요약본      → summary/summary_app.py  원본 IM(PDF) → 4~5장 요약본
+  🖨️ IM Decalcomania → decalco/app.py          원본 IM(PDF) → 생긴 그대로 고칠 수 있는 PPT
 
-★두 도구의 코드는 각자 폴더에 **그대로** 둔다. 합치면서 코드를 뜯어고치면
+★세 도구의 코드는 각자 폴더에 **그대로** 둔다. 합치면서 코드를 뜯어고치면
   잘 돌던 것이 깨지기 쉬워서다. 대신 고를 때마다 그 폴더만 파이썬 경로에
   올려서 실행한다.
 """
@@ -54,6 +55,15 @@ TOOLS = {
         "dir": "summary",
         "file": "summary_app.py",
     },
+    "decalco": {
+        "emoji": "🖨️",
+        "name": "IM Decalcomania",
+        "desc": "원본 IM(PDF)을 <b>생긴 모습 그대로</b> PPT 로 찍어 냅니다. "
+                "표는 표로, 글은 글상자로 들어가 바로 고칠 수 있습니다.",
+        "need": "필요한 파일 : 원본 IM(PDF) 1개",
+        "dir": "decalco",
+        "file": "app.py",
+    },
 }
 
 # 두 도구에 이름이 같은 파일이 있다(extractors.py 는 같지만 claude_api.py 는 다르다).
@@ -81,7 +91,7 @@ def render_home():
 
     _l, mid, _r = st.columns([0.5, 3, 0.5])
     with mid:
-        cols = st.columns(2, gap="large")
+        cols = st.columns(len(TOOLS), gap="large")
         for col, (key, t) in zip(cols, TOOLS.items()):
             with col:
                 with st.container(border=True):
@@ -103,7 +113,7 @@ def render_home():
 
         st.write("")
         st.caption(
-            "⚠️ 두 기능 모두 **원본을 읽어 초안을 만들어 주는 것**입니다. "
+            "⚠️ 세 기능 모두 **원본을 읽어 초안을 만들어 주는 것**입니다. "
             "숫자와 문구는 반드시 담당자가 원본과 대조해 확인하세요."
         )
 
@@ -122,11 +132,16 @@ def render_tool(key: str):
     back, title = st.columns([0.16, 0.84], vertical_alignment="center")
     back.button("◀ 처음 화면", key="go_home", on_click=go_home,
                 use_container_width=True)
-    other = "summary" if key == "convert" else "convert"
-    title.button(
-        f'{TOOLS[other]["emoji"]}  {TOOLS[other]["name"]} 로 바로 가기',
-        key=f"switch_{other}", on_click=open_tool, args=(other,),
-    )
+    # ★도구가 셋이 되었다. '나머지 하나' 로 두면 세 번째로 못 간다 → 전부 버튼으로.
+    others = [k for k in TOOLS if k != key]
+    with title:
+        bcols = st.columns(len(others))
+        for bc, o in zip(bcols, others):
+            bc.button(
+                f'{TOOLS[o]["emoji"]}  {TOOLS[o]["name"]} 로 바로 가기',
+                key=f"switch_{o}", on_click=open_tool, args=(o,),
+                use_container_width=True,
+            )
     st.divider()
 
     t = TOOLS[key]
