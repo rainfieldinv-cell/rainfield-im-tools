@@ -191,6 +191,8 @@ def show_step1():
         accept_multiple_files=True,
         key="file_uploader_widget",
     )
+    st.caption("※ 워드(.docx)도 올릴 수 있지만 **PDF 를 권합니다** — "
+               "워드는 PDF 로 바꾸는 과정에서 줄바꿈·표 모양이 조금 달라질 수 있습니다.")
 
     if uploaded_files:
         # 워드/PDF 분리 — PDF 있으면 PDF로, 없으면 워드를 PDF로 변환해 처리
