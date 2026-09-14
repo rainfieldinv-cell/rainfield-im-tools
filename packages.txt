@@ -1,0 +1,19 @@
+# 웹(스트림릿 클라우드)이 깔 **시스템 프로그램** 목록.
+# requirements.txt 는 파이썬 꾸러미, 이 파일은 운영체제 꾸러미다.
+#
+# ★왜 필요한가
+#   IM 변환기는 워드(.docx)를 받으면 **PDF 로 바꿔서** 읽는다(convert/modules/preview.py).
+#   그 일을 LibreOffice 가 한다. 이게 없으면 워드를 올렸을 때
+#   "LibreOffice(soffice)가 설치되어 있지 않습니다" 가 뜨고 워드는 못 쓴다.
+#
+# ★전체(libreoffice) 가 아니라 writer 만 넣는다.
+#   전체는 스프레드시트·프레젠테이션까지 깔려 덩치가 커지고, 무료 등급에서는
+#   빌드가 길어지거나 한도를 넘겨 **앱 전체가 안 뜰 수 있다.**
+#   워드→PDF 에는 writer 만 있으면 된다.
+libreoffice-writer
+
+# 한글이 깨지지 않게(나눔글꼴). 없으면 변환된 PDF 의 한글이 네모로 나온다.
+fonts-nanum
+
+# pdf2image 가 PDF 를 그림으로 바꿀 때 쓴다(7단계 '전체 미리보기').
+poppler-utils
