@@ -24,6 +24,20 @@ import streamlit as st
 
 import pdf_to_ppt
 
+# 파일 올리기 안내문 — 변환기·요약본과 같은 것을 쓴다(IM 폴더 맨 위 upload_guide.py).
+#   "읽을 수 없는 PDF(스캔본·글자가 그림인 것) 확인법" 과
+#   "워드밖에 없을 때 워드에서 PDF 로 저장하는 법" 이 들어 있다.
+# ★혼자 돌릴 때(통합 앱 밖)는 그 파일이 없으므로, 없으면 조용히 건너뛴다.
+try:
+    import sys as _sys
+    _up = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _up not in _sys.path:
+        _sys.path.append(_up)
+    from upload_guide import render_upload_guide as _render_upload_guide
+except Exception:
+    def _render_upload_guide():
+        pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEP_NAMES = ["원본 업로드", "생성"]
 
@@ -134,6 +148,7 @@ if step == 1:
     st.info(f"글꼴 **{pdf_to_ppt.FONT_BODY} / {pdf_to_ppt.FONT_BOLD}** · "
             f"글자 크기 **{pdf_to_ppt.FONT_SIZE:g}pt 고정** · **전체 쪽**을 옮깁니다.")
 
+    _render_upload_guide()      # 스캔본·글자가 그림인 PDF 주의 · 워드를 PDF로 저장하는 법
     up = st.file_uploader("원본 IM PDF", type=["pdf"])
 
     def _convert_now():
