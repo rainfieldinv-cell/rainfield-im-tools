@@ -7,8 +7,6 @@
 import os, sys, io, re, contextlib, tempfile
 import streamlit as st
 
-import word2pdf
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
@@ -208,25 +206,15 @@ if step == 1:
     st.caption("PDF를 올리면 원본을 읽어 핵심 데이터를 자동으로 뽑습니다. "
                "처음 보는 원본은 1분 남짓 걸리고, 같은 원본은 즉시 나옵니다.")
     _render_upload_guide()      # 스캔본·글자가 그림인 PDF 주의 · 워드를 PDF로 저장하는 법
-    up = st.file_uploader("원본 IM (PDF 권장 · 워드도 가능)",
-                          type=["pdf", "docx", "doc"])
-    st.caption(word2pdf.안내)
+    up = st.file_uploader("원본 IM PDF", type=["pdf"])
 
     if up is not None and st.session_state.get("_pdf_name") != up.name:
-        _raw = up.getvalue()
-        # ★워드면 먼저 PDF 로 바꾼다. 이 도구는 PDF 를 읽게 만들어져 있다.
-        if up.name.lower().endswith((".docx", ".doc")):
-            with st.spinner("워드를 PDF 로 바꾸는 중..."):
-                _raw, _why = word2pdf.바꾸기(_raw, up.name)
-            if _raw is None:
-                st.error(_why)
-                st.stop()
-        st.session_state["_pdf_bytes"] = _raw
+        st.session_state["_pdf_bytes"] = up.getvalue()
         st.session_state["_pdf_name"] = up.name
         st.session_state.pop("ppt", None)
         with st.spinner("원본을 읽어 핵심 데이터를 추출하는 중..."):
             try:
-                d = extract_summary(_raw)
+                d = extract_summary(up.getvalue())
                 st.session_state["data"] = d
                 hl = [dict(h) for h in (d.get("highlights") or [])][:3]
                 while len(hl) < 3:

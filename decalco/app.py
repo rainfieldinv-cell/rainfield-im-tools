@@ -23,7 +23,6 @@ import time
 import streamlit as st
 
 import pdf_to_ppt
-import word2pdf
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STEP_NAMES = ["원본 업로드", "생성"]
@@ -135,9 +134,7 @@ if step == 1:
     st.info(f"글꼴 **{pdf_to_ppt.FONT_BODY} / {pdf_to_ppt.FONT_BOLD}** · "
             f"글자 크기 **{pdf_to_ppt.FONT_SIZE:g}pt 고정** · **전체 쪽**을 옮깁니다.")
 
-    up = st.file_uploader("원본 IM (PDF 권장 · 워드도 가능)",
-                          type=["pdf", "docx", "doc"])
-    st.caption(word2pdf.안내)
+    up = st.file_uploader("원본 IM PDF", type=["pdf"])
 
     def _convert_now():
         """지금 들고 있는 PDF 를 변환해 결과를 담아 둔다."""
@@ -160,18 +157,8 @@ if step == 1:
 
     # ★올리는 즉시 변환한다. 다시 그릴 때마다 또 돌지 않도록 파일 이름으로 가른다.
     if up is not None and st.session_state.get("pdf_name") != up.name:
-        raw = up.getvalue()
-        # ★워드면 먼저 PDF 로 바꾼다. 이 도구는 글자 하나하나의 '자리' 를 재서 옮기는데
-        #   워드에는 그 자리 정보가 없다. 바꾸다 실패해도 앱이 죽으면 안 된다.
-        if up.name.lower().endswith((".docx", ".doc")):
-            with st.spinner("워드를 PDF 로 바꾸는 중..."):
-                raw, why = word2pdf.바꾸기(raw, up.name)
-            if raw is None:
-                st.session_state["pdf_name"] = up.name
-                st.session_state["err"] = why
-                st.rerun()
         st.session_state["pdf_name"] = up.name
-        st.session_state["pdf_bytes"] = raw
+        st.session_state["pdf_bytes"] = up.getvalue()
         _convert_now()
         st.rerun()
 
