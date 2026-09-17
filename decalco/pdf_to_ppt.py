@@ -639,6 +639,7 @@ def _banded(page, rects, charts, taken):
         groups.setdefault((round(r.x0 / 3), round(r.x1 / 3)), []).append(r)
 
     out = []
+    seen = set()
     for v in groups.values():
         if len(v) < 3:
             continue
@@ -649,13 +650,26 @@ def _banded(page, rects, charts, taken):
                         max(r.x1 for r in v), ys[-1])
         if reg.height < 40:
             continue
-        if any((reg & b).get_area() > reg.get_area() * 0.5 for b in taken):
+        # ★겹침은 **양쪽으로** 봐야 한다. '이 자리가 이미 표에 반 넘게 덮였나' 만 보면,
+        #   작은 표 여러 개를 **통째로 감싸는 큰 띠**가 그냥 통과한다. 그러면 진짜 표
+        #   위에 20행짜리 빈 표가 얹혀 화면이 엉망이 된다(방배동 14쪽: 표 3개를 덮는
+        #   가짜 표가 둘이나 생겼다).
+        #   ★이미 표가 있는 자리와 **조금이라도 겹치면 만들지 않는다.**
+        #     실측이 아주 깨끗하다 — IM 7개에서 후보 20여 개 중 **진짜 띠 표 6개는
+        #     겹침이 전부 0%** 이고, 나머지는 전부 기존 표 안에 든 '열 묶음'(겹침 38~100%)이다.
+        #     예전 기준(50%)으로는 29·38% 짜리 가짜가 통과해, 그게 커져서 20행짜리
+        #     빈 표가 진짜 표 셋을 통째로 덮었다(방배동 14쪽).
+        if any((reg & b).get_area() > reg.get_area() * 0.05 for b in taken):
             continue
         if any((reg & c).get_area() > reg.get_area() * 0.3 for c in charts):
             continue
         if sum(1 for b in bars
                if _inside(b, reg) and b.width > reg.width * 0.8) >= 2:
-            out.append(reg)
+            # 같은 자리를 두 번 넣지 않는다(x 묶음이 달라도 범위가 같을 수 있다)
+            key = tuple(round(v) for v in reg)
+            if key not in seen:
+                seen.add(key)
+                out.append(reg)
     return out
 
 
@@ -802,9 +816,14 @@ def _cells_of(region, lines, fills=(), txt=(), skip=()):
         return _axis(list(base) + add, lo, hi)
 
     def _drop_slivers(a, least=3.0):
-        """눈에 안 보일 만큼 얇은 칸(3pt 미만)은 없앤다.
+        """눈에 안 보일 만큼 얇은 칸은 없앤다.
 
         ★안 없애면 표 맨 아래에 3.2pt 짜리 **빈 행이 하나 더** 생긴다(사용자 지적).
+        ★기준을 5pt 로 올려 보았지만 **되돌렸다**(2026-09-17).
+          4pt 짜리 빈 행 5개(방배동 17쪽 시공사~사업진행일정 사이 등)는 없어지지만,
+          그 행의 **테두리도 같이 빠져** 선이 13개 사라진다(이천 28→35, 넷마블 26→32).
+          빈 행 하나보다 빠진 선이 더 눈에 띈다. 열(xs)에 쓰면 더 나쁘다 — 3~5pt 짜리
+          좁은 열은 진짜 칸막이라 대전 못넣은선이 0 → 19 로 튄다.
         """
         out = list(a)
         # 가장자리(맨 위·맨 아래)의 얇은 띠는 표 범위를 넓히다 생긴 군더더기다 → 더 넉넉히
