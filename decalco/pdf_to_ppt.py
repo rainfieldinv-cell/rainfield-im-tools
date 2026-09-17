@@ -41,7 +41,7 @@ from pptx.util import Emu, Pt
 # ── 고정 규칙(사용자 확정) ───────────────────────────
 FONT_BOLD = "피플폰트 Bold"
 FONT_BODY = "피플폰트 Light"
-FONT_SIZE = 9.0                 # 전부 9pt 로 고정한다
+FONT_SIZE = 10.0                # 전부 10pt 로 고정한다(사용자 확정, 2026-09-17)
 
 # ★표 머리글·진하게 칠한 자리는 **전부 이 남색**으로 통일한다(사용자 확정).
 #   원본 IM 들을 재보니 칠한 색이 두 무리로 딱 갈린다 — 밝기 0.35 이하(1,365칸,
@@ -1225,14 +1225,62 @@ def _para_font(para, name, size_pt, color=None):
     _para_font_el(para._p, name, size_pt, color)
 
 
+def _fit_overflow(table, xs, cells, size_pt):
+    """칸 폭을 넘치는 글자를 **그 칸만** 줄여서 한 줄에 들어가게 한다.
+
+    ★파워포인트 표 칸은 `wrap="none"` 을 **무시하고 무조건 줄을 접는다**(글상자와 다르다).
+      그래서 글자가 칸보다 넓으면 두 줄이 되고, 그 행이 두 배로 부풀어 표가 통째로 늘어난다.
+      9pt 일 때는 대부분 칸에 들어갔는데 10pt 로 올리자 103칸이 새로 넘쳐
+      7개 문서에서 표 28개가 부풀었다(천안 16쪽 14pt 행 → 26pt).
+    → 넘치는 칸의 글자만 폭에 맞게 낮춘다. 표 전체를 낮추지 않는다.
+    """
+    n_col = len(xs) - 1
+    for (r0, c0, rs, cs) in cells:
+        try:
+            cell = table.cell(r0, c0)
+        except Exception:
+            continue
+        x0, x1 = xs[c0], xs[min(c0 + cs, n_col)]
+        # ★칸 여백을 빼야 한다. 원본 자리를 맞추려고 좌우 여백을 준 칸이 있는데
+        #   (오른쪽 정렬 숫자 칸 등) 그걸 안 빼면 '들어간다' 고 잘못 재서 그 칸이
+        #   두 줄로 접힌다(헌인 34쪽: 폭 62·여백 3.9 인데 글자 61 → 실제로는 넘침).
+        try:
+            ml = (cell.margin_left or 0) / 12700.0
+            mr = (cell.margin_right or 0) / 12700.0
+        except Exception:
+            ml = mr = 0.0
+        room = (x1 - x0) - ml - mr - 1.5
+        if room <= 2:
+            continue
+        for para in cell.text_frame.paragraphs:
+            runs = para.runs
+            if not runs:
+                continue
+            txt = "".join(r.text for r in runs)
+            if not txt.strip():
+                continue
+            cur = runs[0].font.size.pt if runs[0].font.size else size_pt
+            w = _text_w(txt, cur)
+            if w <= room:
+                continue
+            # 폭에 맞을 만큼만 낮춘다. 너무 작아지지는 않게 바닥을 둔다.
+            small = max(size_pt * 0.72, cur * room / w)
+            for r in runs:
+                r.font.size = Pt(small)
+            _para_font_el(para._p, FONT_BODY, small)
+
+
 def _fit_thin_rows(gframe, ys, size_pt):
     """원본이 아주 얇게 그린 행을 그 높이 그대로 지킨다.
 
-    ★파워포인트 표의 행 높이에는 **최소값**이 있다 — 글자 크기의 1.2배(9pt면 10.8pt).
-      원본에 4~8pt 짜리 빈 행이 있으면 전부 10.8pt 로 부풀어 표가 통째로 늘어난다
-      (7쪽에서 빈 행 4개가 정확히 22.5pt 를 밀어 올려 맨 아랫줄이 푸터를 덮었다).
-    → 그런 행의 **빈 칸**만 기본 글자 크기를 낮춰 원본 높이가 지켜지게 한다.
-      글자가 없는 칸이라 보이는 것은 달라지지 않는다.
+    ★파워포인트 표의 행 높이에는 **최소값**이 있다 — 글자 크기의 1.2배
+      (9pt 면 10.8pt, 10pt 면 12pt). 원본이 그보다 얇게 그린 행은 전부 그 최소값으로
+      부풀어 표가 통째로 늘어난다(7쪽에서 빈 행 4개가 정확히 22.5pt 를 밀어 올려
+      맨 아랫줄이 푸터를 덮었다).
+    → 그런 행은 **그 행 안의 글자만** 행 높이에 맞게 낮춘다. 빈 칸도 글자 든 칸도 똑같이.
+      ★글자 든 칸을 빼 두면 안 된다 — 9pt 일 때는 10.8pt 보다 얇은 행이 거의 다 빈 행이라
+      티가 안 났지만, 10pt(최소 12pt)로 올리자 **글자 든 얇은 행**이 걸려 7개 문서에서
+      표 28개가 부풀었다(최대 +69pt).
     """
     tbl = gframe._element.graphic.graphicData.tbl
     trs = tbl.findall(qn("a:tr"))
@@ -1243,14 +1291,34 @@ def _fit_thin_rows(gframe, ys, size_pt):
         if h >= size_pt * 1.2:
             continue
         small = max(1.0, h / 1.2 - 0.2)
+        sz = str(int(round(small * 100)))
         for tc in tr.findall(qn("a:tc")):
             body = tc.find(qn("a:txBody"))
             if body is None:
                 continue
             for p_el in body.findall(qn("a:p")):
-                if p_el.findall(qn("a:r")):
-                    continue                    # 글자가 있으면 건드리지 않는다
-                _para_font_el(p_el, FONT_BODY, small)
+                runs = p_el.findall(qn("a:r"))
+                if not runs:
+                    _para_font_el(p_el, FONT_BODY, small)
+                    continue
+                # 글자가 있는 칸 — 그 글자들을 행 높이에 맞게 낮춘다
+                for r_el in runs:
+                    rPr = r_el.find(qn("a:rPr"))
+                    if rPr is None:
+                        rPr = parse_xml(f'<a:rPr {nsdecls("a")} lang="ko-KR"/>')
+                        r_el.insert(0, rPr)
+                    rPr.set("sz", sz)
+                for e in p_el.findall(qn("a:endParaRPr")):
+                    e.set("sz", sz)
+                pPr = p_el.find(qn("a:pPr"))
+                if pPr is not None:
+                    for d in pPr.findall(qn("a:defRPr")):
+                        d.set("sz", sz)
+                    # 줄 간격도 같이 낮춰야 행이 안 부푼다
+                    for ls in pPr.findall(qn("a:lnSpc")):
+                        pPr.remove(ls)
+                    pPr.insert(0, parse_xml(
+                        f'<a:lnSpc {nsdecls("a")}><a:spcPts val="{sz}"/></a:lnSpc>'))
 
 
 def _fill_para(para, parts, size_pt, force_hex=None):
@@ -1747,6 +1815,7 @@ def _put_table(slide, xs, ys, cells, lines, fills, txt_lines, used, size_pt,
         for para in cell.text_frame.paragraphs:
             if not para.runs:
                 _para_font(para, FONT_BODY, size_pt, ink)
+    _fit_overflow(table, xs, cells, size_pt)   # 칸 넘치는 글자만 그 칸에서 줄인다
     _fit_thin_rows(gframe, ys, size_pt)
     return gframe
 
