@@ -363,6 +363,19 @@ def _inside(r, box, tol=1.5):
             and r.y0 >= box.y0 - tol and r.y1 <= box.y1 + tol)
 
 
+def _same_spot(a, b, least=0.8):
+    """둘이 **사실상 같은 자리**인가(겹친 넓이 ÷ 합친 넓이).
+
+    '안에 든 표'와 헷갈리면 안 된다 — 안쪽 표는 한쪽만 100% 겹치므로 이 값이
+    낮게 나온다(바깥의 78% 를 채우는 안쪽 표도 0.78). 실제로 잡아야 할 쌍둥이는
+    1pt 어긋난 정도라 0.99 가 넘는다.
+    """
+    inter = abs((a & b).get_area())
+    if inter <= 0:
+        return False
+    return inter / (abs(a.get_area()) + abs(b.get_area()) - inter) > least
+
+
 def _table_groups(page):
     """[(바깥 표, [그 안에 든 표들])] — 표 안의 표를 **따로** 가려낸다.
 
@@ -691,6 +704,7 @@ def _plan(page, txt=()):
     # 세로선이 없어 find_tables 가 못 찾은 '가로 띠 표' 도 후보에 넣는다
     groups += [(r, []) for r in
                _banded(page, grid, charts, [b for b, _ in groups])]
+    placed = []                     # 자리를 잡은 바깥 표(**넓힌 뒤** 기준)
     for (box, inners) in groups:
         # 차트 자리에 생긴 '표'는 눈금선을 격자로 본 것이다 — 표가 아니다
         if any((box & c).get_area() > box.get_area() * 0.5 for c in charts):
@@ -699,6 +713,16 @@ def _plan(page, txt=()):
         #   (천안 3쪽: 실제 표는 x 542 까지인데 456 까지만 잡아 줘 **맨 오른쪽 열이
         #    통째로 빠졌다**).
         box = _grow(box, rects, page.rect)
+        # ★같은 표인지는 **넓히고 나서야** 드러난다. find_tables 가 표를 좁게 잡아 줄
+        #   때가 있는데(PyMuPDF 1.28: 37쪽 표를 x 41.9~552.6 대신 148.8~505.3 으로
+        #   준다), 그러면 남은 왼쪽 띠를 _banded 가 **별개 표**로 잡는다. 둘 다 _grow
+        #   로 표 전체까지 넓어져 **같은 자리에 표가 둘** 생기고, 글자는 먼저 그린
+        #   쪽이 다 가져가 뒤엣것은 **텅 빈 유령 표**로 남는다(3·10·15·34·37쪽).
+        # → 넓힌 뒤 거의 같은 자리면 버린다. '안에 든 표'(겹침이 한쪽만 100%)는
+        #   여기서 안 걸린다 — 그건 inners 로 따로 처리한다.
+        if any(_same_spot(box, k) for k in placed):
+            continue
+        placed.append(box)
         inners = [_grow(b, rects, box) for b in inners]
         keep = [it for it in grid if not any(_inside(it["r"], b) for b in inners)]
         o_lines = _Lines(keep)
