@@ -91,6 +91,15 @@ _SPACE_PT = 2.6     # 이보다 벌어지면 글자 사이에 **띄어쓰기**�
 #   이보다 크게 벌어졌을 때만 딴 것으로 본다(좌우 두 단 배치 등).
 _GAP_PT = 60.0
 _SPACE_W = 2.5      # 9pt 글자에서 띄어쓰기 하나의 대략 폭(pt)
+# ★'벌어져 있다 = 띄어쓰기' 가 **아닌** 두 경우(사용자 지적 2026-09-21).
+#   ① 한글과 영문·숫자 사이 — 파워포인트가 **저절로** 넣는 간격이다(원본에 공백
+#      글자가 없다). 양쪽정렬로 늘어나면 5~10pt 까지 벌어져 낱말이 쪼개진다
+#      ('삼성SDI'→'삼성 SDI', '천안제3'→'천안 제 3', '2021년'→'2021 년').
+#   ② 짧은 머리글을 **균등분할**로 벌려 놓은 것 — 표 머리글 '구분'·'내용' 이
+#      20~25pt 벌어져 '구 분'·'내 용' 이 됐다.
+_HAN_RE = re.compile(r"[가-힣ㄱ-ㆎ]")
+_LAT_RE = re.compile(r"[0-9A-Za-z]")
+_SPREAD_MAX = 4     # 공백 뺀 글자가 이 수 이하면 '벌려 놓은 짧은 머리글' 로 본다
 _MIN_RECT = 0.3     # 이보다 작은 네모는 버린다(pt)
 THIN_PT = 2.2       # 이보다 얇은 네모는 '선' 으로 본다
 _TOL = 2.0          # 같은 격자선으로 볼 좌표 오차(pt)
@@ -1132,17 +1141,47 @@ def _underlines(rects, txt_lines):
     return skip
 
 
+def _unspread(chars):
+    """'구 분' 처럼 **한 글자씩 떼어 놓은 머리글**을 도로 붙인다 → '구분'.
+
+    ★원본이 표 머리글을 균등분할로 보이게 하려고 글자 사이에 공백을 넣어 두었다
+      (헌인마을 IM: '구 분' 24 곳, '구    분' 3 곳, '금  액'·'합  계'·'비    고').
+      그대로 옮기면 PPT 글자가 '구 분' 이 되어 **낱말이 아니게 된다**(사용자 지적).
+      보기 모양은 칸 정렬이 맡으면 되고, 글자는 낱말 그대로여야 고쳐 쓸 수 있다.
+    ★'서울 방배동' 같은 진짜 띄어쓰기를 건드리면 안 된다 → **토막이 전부 한 글자**
+      이고 2~4 토막이며 **모두 한글**일 때만 붙인다.
+    """
+    text = "".join(c["c"] for c in chars)
+    bits = text.split()
+    if not (2 <= len(bits) <= _SPREAD_MAX):
+        return chars
+    if any(len(b) != 1 or not _HAN_RE.match(b) for b in bits):
+        return chars
+    return [c for c in chars if c["c"].strip()]
+
+
 def _parts_of(chars):
     """글자들을 색·굵기가 같은 것끼리 묶어 run 으로 만든다.
 
     ★사이가 벌어진 곳에는 **띄어쓰기를 넣는다.** 이 원본은 낱말 사이를 공백 글자가
       아니라 자리로 벌려 놓은 데가 있어서(예: '돈암동 628'), 그냥 이으면 붙어 버린다.
+
+    ★단, **벌어졌다고 다 띄어쓰기는 아니다**(_SPREAD_MAX 위의 설명 참고).
+      한글↔영숫자 사이와, 균등분할로 벌려 놓은 짧은 머리글은 넣지 않는다.
     """
-    parts, prev = [], None
+    chars = _unspread(chars)
+    # 공백을 뺀 글자가 몇 자인가 — '구분'·'내용' 처럼 짧으면 벌려 놓은 머리글이다
+    solid = "".join(c["c"] for c in chars if c["c"].strip())
+    spread_label = len(solid) <= _SPREAD_MAX
+    parts, prev, prevc = [], None, ""
     for c in chars:
         pad = ""
         if prev is not None and c["c"].strip():
             d = c["bbox"].x0 - prev
+            cross = bool((_HAN_RE.match(prevc) and _LAT_RE.match(c["c"]))
+                         or (_LAT_RE.match(prevc) and _HAN_RE.match(c["c"])))
+            if cross or spread_label:
+                d = 0.0                 # 벌어진 게 띄어쓰기가 아니다
             if d > _SPACE_PT:
                 # 벌어진 만큼 띄어쓰기를 넣는다(하나만 넣으면 '※ 본문' 이 붙어 버린다)
                 pad = " " * max(1, min(24, int(round(d / _SPACE_W))))
@@ -1156,6 +1195,7 @@ def _parts_of(chars):
                           "bold": c["bold"], "font": c["font"],
                           "size": c["size"], "under": c.get("under", False)})
         prev = c["bbox"].x1
+        prevc = c["c"]
     return parts
 
 
