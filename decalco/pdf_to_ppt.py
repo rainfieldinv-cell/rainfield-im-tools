@@ -90,7 +90,6 @@ _SPACE_PT = 2.6     # 이보다 벌어지면 글자 사이에 **띄어쓰기**�
 #   조각마다 글상자를 만들면 각주가 두 조각으로 쪼개진다.
 #   이보다 크게 벌어졌을 때만 딴 것으로 본다(좌우 두 단 배치 등).
 _GAP_PT = 60.0
-_SPACE_W = 2.5      # 9pt 글자에서 띄어쓰기 하나의 대략 폭(pt)
 # ★'벌어져 있다 = 띄어쓰기' 가 **아닌** 두 경우(사용자 지적 2026-09-21).
 #   ① 한글과 영문·숫자 사이 — 파워포인트가 **저절로** 넣는 간격이다(원본에 공백
 #      글자가 없다). 양쪽정렬로 늘어나면 5~10pt 까지 벌어져 낱말이 쪼개진다
@@ -1160,6 +1159,24 @@ def _unspread(chars):
     return [c for c in chars if c["c"].strip()]
 
 
+def _one_space(chars):
+    """**잇달아 붙은 공백은 한 칸으로 줄인다**(사용자 확정: "띄어쓰기는 다 1칸").
+
+    원본 PDF 가 '·   기 매입 단독주택', 'EXIT  분양률' 처럼 공백을 두세 개 넣어
+    자리를 맞춰 둔 데가 있다. 보기 모양은 정렬·들여쓰기가 맡고, 글자는 한 칸만.
+    자리 재기가 어긋나지 않게 **남긴 공백의 오른쪽 끝을 마지막 공백까지** 늘린다.
+    """
+    out = []
+    for c in chars:
+        if not c["c"].strip() and out and not out[-1]["c"].strip():
+            out[-1] = dict(out[-1],
+                           bbox=fitz.Rect(out[-1]["bbox"].x0, out[-1]["bbox"].y0,
+                                          c["bbox"].x1, out[-1]["bbox"].y1))
+            continue
+        out.append(c)
+    return out
+
+
 def _parts_of(chars):
     """글자들을 색·굵기가 같은 것끼리 묶어 run 으로 만든다.
 
@@ -1169,7 +1186,7 @@ def _parts_of(chars):
     ★단, **벌어졌다고 다 띄어쓰기는 아니다**(_SPREAD_MAX 위의 설명 참고).
       한글↔영숫자 사이와, 균등분할로 벌려 놓은 짧은 머리글은 넣지 않는다.
     """
-    chars = _unspread(chars)
+    chars = _one_space(_unspread(chars))
     # 공백을 뺀 글자가 몇 자인가 — '구분'·'내용' 처럼 짧으면 벌려 놓은 머리글이다
     solid = "".join(c["c"] for c in chars if c["c"].strip())
     spread_label = len(solid) <= _SPREAD_MAX
@@ -1182,9 +1199,14 @@ def _parts_of(chars):
                          or (_LAT_RE.match(prevc) and _HAN_RE.match(c["c"])))
             if cross or spread_label:
                 d = 0.0                 # 벌어진 게 띄어쓰기가 아니다
+            if prevc and not prevc.strip():
+                d = 0.0                 # 앞이 이미 공백 글자다 — 더 넣지 않는다
             if d > _SPACE_PT:
-                # 벌어진 만큼 띄어쓰기를 넣는다(하나만 넣으면 '※ 본문' 이 붙어 버린다)
-                pad = " " * max(1, min(24, int(round(d / _SPACE_W))))
+                # ★**무조건 한 칸만**(사용자 확정 2026-09-21: "띄어쓰기는 다 1칸").
+                #   예전에는 벌어진 폭만큼 2~15칸을 넣어 원본 모양을 흉내 냈는데,
+                #   글자로 보면 공백이 여러 칸이라 고쳐 쓸 수가 없었다.
+                #   글머리표·목차 들여쓰기도 예외 없다.
+                pad = " "
         key = (c["hex"], c["bold"], c["font"], c["size"], c.get("under", False))
         if parts and parts[-1]["key"] == key:
             parts[-1]["text"] += pad + c["c"]
