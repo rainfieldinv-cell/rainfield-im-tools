@@ -1611,6 +1611,56 @@ def _set_border(cell, tag, rgb, width_pt, dash=False):
     tcPr.insert_element_before(ln, *_LN_ORDER[_LN_ORDER.index(tag) + 1:])
 
 
+def _head_rows(cells, hex_of, n_row):
+    """맨 위 **머리글 행**이 어디까지인가 → 그 행 번호들.
+
+    ★사용자 확정 규칙: "표 헤더나 진한 부분은 다 남색". 그런데 예전 코드는
+      **진한 칸만** 남색으로 바꿨다. 머리글이 연한 색인 IM 이 있어서
+      (롯데백화점 분당점: 머리글이 D9E2F3·DEEAF6 연한 파랑) 그런 표는
+      머리글이 통째로 안 칠해졌다 — 사용자 지적 2026-09-22.
+
+    무엇을 머리글로 보나 — **맨 위 행이 색으로 꽉 차 있고, 그 색이 본문 칸에는
+    거의 없을 때.** 두 가지를 다 봐야 한다:
+      · 꽉 차 있나 — 라벨 열만 색칠한 표(첫 행이 '라벨(색)|값(흰)')를 거른다.
+      · 본문에 없나 — 줄무늬(홀짝 색칠) 표의 첫 줄을 거른다.
+    머리글 한 줄에 **색이 섞여 있을 수도 있다**(롯데 18·21쪽: '구분' 은 연한 파랑,
+    '2029 년' 은 진한 색). 그래서 색이 같은지는 안 따지고 **칠해져 있는지만** 본다.
+    머리글이 두 줄인 표가 있어 **두 줄까지** 본다(그보다 깊은 건 본 적이 없다).
+    여러 행에 걸친 칸(rs>1)은 줄 셈에서 뺀다 — 칠하기는 _put_table 에서 **그 칸이
+    걸친 줄이 전부 머리글일 때** 한다('구분' 이 머리글 두 줄에 걸쳐 있는 경우).
+    """
+    if n_row < 2:
+        return set()
+    flat = [(r0, cs, hex_of[k]) for k in cells
+            for (r0, c0, rs, cs) in [k] if rs == 1]
+    by_row = {}
+    for r0, cs, hx in flat:
+        by_row.setdefault(r0, []).append((cs, hx))
+    out, hues = set(), None
+    for r in range(min(2, n_row - 1)):
+        row = by_row.get(r)
+        if not row or any(not hx for _, hx in row):
+            break                           # 빈 칸이 섞이면 머리글이 아니다
+        cols = {hx for _, hx in row}
+        if hues is None:
+            hues = cols                     # 첫 줄 색이 머리글 색이다
+        elif not cols <= hues:
+            break                           # ★색이 달라지면 거기서 머리글 끝.
+            # 안 막으면 본문이 통째로 연회색인 표에서 본문 첫 줄까지 머리글로
+            # 빨아들이고, 그 색이 본문에 흔하다는 이유로 아래 검사에서 통째로
+            # 떨어진다(롯데 17·22·28쪽: 머리글 D9E2F3 + 본문 F5F5F5).
+        out.add(r)
+    if not out:
+        return set()
+    # 그 색들이 본문에도 흔하면 머리글이 아니라 줄무늬다
+    body = [(cs, hx) for r0, cs, hx in flat if r0 not in out]
+    if body:
+        same = sum(cs for cs, hx in body if hx in hues)
+        if same > sum(cs for cs, _ in body) * 0.3:
+            return set()
+    return out
+
+
 def _cell_fill_hex(fills, rect):
     """칸 배경색 — 그 칸을 덮는 두꺼운 네모 중 **마지막에 그린 것**."""
     cx, cy = (rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2
@@ -1664,6 +1714,13 @@ def _put_table(slide, xs, ys, cells, lines, fills, txt_lines, used, size_pt,
             except Exception:
                 pass
 
+    # 칸마다 원본 색을 먼저 다 구해 둔다 — 머리글 행을 가려내려면 표 전체를 봐야 한다
+    hex_of = {}
+    for (r0, c0, rs, cs) in cells:
+        hex_of[(r0, c0, rs, cs)] = _cell_fill_hex(
+            fills, fitz.Rect(xs[c0], ys[r0], xs[c0 + cs], ys[r0 + rs]))
+    head_rows = _head_rows(cells, hex_of, n_row)
+
     navy_at = set()               # 남색으로 칠한 자리(합쳐져 가려진 칸까지)
     for (r0, c0, rs, cs) in cells:
         try:
@@ -1673,11 +1730,12 @@ def _put_table(slide, xs, ys, cells, lines, fills, txt_lines, used, size_pt,
         x0, y0, x1, y1 = xs[c0], ys[r0], xs[c0 + cs], ys[r0 + rs]
         box = fitz.Rect(x0, y0, x1, y1)
 
-        # ★진하게 칠한 칸(머리글)은 **전부 남색**으로 맞춘다. 연한 색은 원본 그대로.
-        rgb = _cell_fill_hex(fills, box)
+        # ★진하게 칠한 칸과 **머리글 행**은 전부 남색. 나머지 연한 색은 원본 그대로.
+        rgb = hex_of[(r0, c0, rs, cs)]
         ink = None
         if rgb:
-            if _is_dark(rgb):
+            in_head = head_rows and all(r0 + k in head_rows for k in range(rs))
+            if _is_dark(rgb) or in_head:
                 rgb, ink = NAVY, WHITE
                 navy_at.update((r0 + a, c0 + b)
                                for a in range(rs) for b in range(cs))
