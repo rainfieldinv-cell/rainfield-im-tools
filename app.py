@@ -2,9 +2,10 @@
 """레인필드 IM 도구 — 처음 화면.
 
 IM 관련 도구 세 개를 한 주소에서 쓴다. (계약서 도구와 같은 방식)
-  📑 IM 변환기      → convert/app.py          원본 IM(PDF) → 회사 양식 제안서 전체
-  📄 IM 요약본      → summary/summary_app.py  원본 IM(PDF) → 4~5장 요약본
-  🖨️ IM Decalcomania → decalco/app.py          원본 IM(PDF) → 생긴 그대로 고칠 수 있는 PPT
+  📑 IM 변환기      → 기존 IM/app.py            원본 IM(PDF) → 회사 양식 제안서 전체
+  📄 IM 요약본      → IM 요약본/summary_app.py  원본 IM(PDF) → 4~5장 요약본
+  🖨️ IM Decalcomania → IM 붕어빵/app.py          원본 IM(PDF) → 생긴 그대로 고칠 수 있는 PPT
+  (폴더 이름은 2026-10-06 convert/summary/decalco 에서 한글로 바꿨다)
 
 ★세 도구의 코드는 각자 폴더에 **그대로** 둔다. 합치면서 코드를 뜯어고치면
   잘 돌던 것이 깨지기 쉬워서다. 대신 고를 때마다 그 폴더만 파이썬 경로에
@@ -43,7 +44,7 @@ TOOLS = {
         "desc": "원본 IM(PDF)을 읽어 <b>회사 양식 제안서 한 벌</b>로 만듭니다. "
                 "표지부터 연락처까지 20장 안팎으로 나옵니다.",
         "need": "필요한 파일 : 원본 IM(PDF) 1개",
-        "dir": "convert",
+        "dir": "기존 IM",
         "file": "app.py",
     },
     "summary": {
@@ -52,7 +53,7 @@ TOOLS = {
         "desc": "원본 IM(PDF)을 <b>4~5장짜리 요약본</b>으로 줄입니다. "
                 "먼저 보고할 때 쓰고, 금융구조도도 함께 만들 수 있습니다.",
         "need": "필요한 파일 : 원본 IM(PDF) 1개",
-        "dir": "summary",
+        "dir": "IM 요약본",
         "file": "summary_app.py",
     },
     "decalco": {
@@ -61,7 +62,7 @@ TOOLS = {
         "desc": "원본 IM(PDF)을 <b>생긴 모습 그대로</b> PPT 로 찍어 냅니다. "
                 "표는 표로, 글은 글상자로 들어가 바로 고칠 수 있습니다.",
         "need": "필요한 파일 : 원본 IM(PDF) 1개",
-        "dir": "decalco",
+        "dir": "IM 붕어빵",
         "file": "app.py",
     },
 }
