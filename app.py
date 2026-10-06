@@ -172,6 +172,13 @@ def render_tool(key: str):
     finally:
         os.chdir(cwd)
 
+    # ★도구마다 자기 화면 위 여백을 작게(1.6rem 등) 잡아 둬서, 맨 위의
+    #   '◀ 처음 화면 / 바로 가기' 버튼 줄이 스트림릿 머리 띠(약 60px) 밑으로 들어가
+    #   잘려 보였다(변환기는 아예 안 보였다 — 2026-10-06 사용자 지적).
+    #   → 도구를 다 그린 **뒤에** 여기서 한 번 더 덮어쓴다(뒤에 온 것 + !important 가 이긴다).
+    st.markdown("<style>.block-container{padding-top:4.6rem !important;}</style>",
+                unsafe_allow_html=True)
+
 
 tool = st.session_state.get("tool")
 if tool in TOOLS:
