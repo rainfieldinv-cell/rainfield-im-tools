@@ -147,24 +147,67 @@ if step == 1:
     if up is not None and st.session_state.get("cf_name") != up.name:
         st.session_state["cf_name"] = up.name
         st.session_state["cf_bytes"] = up.getvalue()
-        st.session_state.pop("cf_err", None)
+        for k in ("cf_err", "cf_repair"):
+            st.session_state.pop(k, None)
         try:
             st.session_state["cf_info"] = _read_source(up.name, up.getvalue())
         except zipfile.BadZipFile:
-            # ★실제로 있었다 — 부산 남포동 워드 원본은 파일 끝이 잘려 있어 못 연다.
-            #   (기존 IM 의 preview._salvage_docx_zip 이 이런 파일을 되살리던 기능. 만들기 붙일 때 가져온다)
-            st.session_state["cf_info"] = None
-            st.session_state["cf_err"] = (
-                "이 워드 파일은 **깨져 있어서** 열 수 없습니다(받을 때 파일 끝부분이 잘린 경우가 많습니다).\n\n"
-                "1. 워드에서 이 파일을 한 번 열고(워드가 고쳐서 엽니다)\n"
-                "2. **F12** → 파일 형식 **'Word 문서(*.docx)'** 로 다시 저장한 뒤 그 파일을 올려 주세요.\n\n"
-                "같은 IM 의 PDF 가 있으면 PDF 를 올려도 됩니다.")
+            # ★실제로 있었다 — 부산 남포동 워드 원본은 파일 끝이 잘려 있어 못 열었다.
+            #   먼저 스스로 고쳐 보고(docx_repair), 그래도 안 될 때만 사람에게 부탁한다.
+            from docx_repair import repair_docx, missing_summary
+            fixed, missing = repair_docx(up.getvalue())
+            info = None
+            if fixed is not None:
+                try:
+                    info = _read_source(up.name, fixed)
+                except Exception:
+                    info = None
+            if info is not None:
+                st.session_state["cf_bytes"] = fixed          # 이후 단계는 고친 파일로 진행
+                st.session_state["cf_info"] = info
+                st.session_state["cf_repair"] = missing_summary(missing)
+            else:
+                st.session_state["cf_info"] = None
+                st.session_state["cf_err"] = "broken"
         except Exception as e:
             st.session_state["cf_info"] = None
             st.session_state["cf_err"] = f"파일을 열지 못했습니다 : {e}"
 
-    if st.session_state.get("cf_err"):
-        st.error(st.session_state["cf_err"])
+    err = st.session_state.get("cf_err")
+    if err == "broken":
+        st.error(
+            "**이 워드 파일은 깨져 있어서 열 수 없습니다.** 자동으로 고쳐 보았지만 본문까지 "
+            "잘려 나가 되살리지 못했습니다.\n\n"
+            "**왜 이런가요?** 워드 파일(.docx)은 본문·서식·그림 같은 여러 조각을 하나로 묶은 "
+            "압축 파일이고, 맨 끝에 '어느 조각이 어디 있는지' 적힌 **목차**가 붙어 있습니다. "
+            "메일로 주고받거나 내려받는 도중에 **파일 끝부분이 잘리면** 이 목차가 사라져 "
+            "프로그램이 파일을 열지 못합니다. 워드 프로그램은 이런 파일도 스스로 고쳐서 열어 주기 때문에, "
+            "내 컴퓨터에서는 멀쩡해 보일 수 있습니다.\n\n"
+            "**이렇게 해 주세요**\n"
+            "1. 이 파일을 **워드에서 열어** 주세요. '복구할까요?' 라고 물으면 **예**를 누릅니다.\n"
+            "2. **F12** → 파일 형식 **'Word 문서(*.docx)'** → 저장.\n"
+            "3. 새로 저장한 파일을 여기에 다시 올려 주세요.\n\n"
+            "같은 IM 의 **PDF** 가 있으면 PDF 를 올리는 것이 더 정확합니다. 보낸 쪽에 원본을 "
+            "다시 받을 수 있으면 그게 가장 좋습니다.")
+    elif err:
+        st.error(err)
+
+    repair = st.session_state.get("cf_repair")
+    if repair is not None:
+        if repair:
+            st.warning(
+                "🛠️ **깨진 워드 파일이라 자동으로 고쳐서 열었습니다.** 다만 **되살리지 못한 부분**이 있습니다 : "
+                f"**{repair}**\n\n"
+                "**왜 이런가요?** 이 파일은 받는 도중에 **파일 끝부분이 잘려 나간** 상태입니다. 워드 파일은 "
+                "본문·서식·그림 같은 조각을 묶어 둔 것인데, 잘려 나간 뒤쪽에 있던 조각은 파일 안에 **아예 "
+                "남아 있지 않아** 어떤 프로그램으로도 되살릴 수 없습니다(워드에서 다시 저장해도 마찬가지입니다).\n\n"
+                "**그래서 결과물이 원본과 이렇게 다를 수 있습니다**\n"
+                "- 서식이 빠지면 글머리표(✓ 등)가 번호로 바뀌거나 줄 간격이 넓어져 쪽이 밀립니다.\n"
+                "- 빠진 그림은 그 자리가 비어 나옵니다.\n\n"
+                "**더 정확하게 하려면** 같은 IM 의 **PDF** 를 올리거나, 보낸 쪽에 **원본 워드를 다시 요청**해 주세요. "
+                "이대로 계속 진행해도 됩니다.")
+        else:
+            st.info("🛠️ 깨진 워드 파일이라 자동으로 고쳐서 열었습니다. 빠진 내용은 없습니다.")
 
     info = st.session_state.get("cf_info")
     if info:
