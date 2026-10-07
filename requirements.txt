@@ -21,3 +21,7 @@ Pillow
 anthropic<1
 python-dotenv
 pdf2image
+# IM 회사양식 — PDF 원본을 워드로 바꾼다(2026-10-07). PyMuPDF 1.24.14 로 시험해 됐다.
+pdf2docx
+opencv-python-headless
+fonttools

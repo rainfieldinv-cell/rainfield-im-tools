@@ -80,7 +80,9 @@ TOOLS = {
 # 두 도구에 이름이 같은 파일이 있다(extractors.py 는 같지만 claude_api.py 는 다르다).
 # 도구를 바꿀 때 앞서 불러둔 것이 남아 있으면 **엉뚱한 쪽이 불린다** → 지우고 다시 읽는다.
 _SHARED_NAMES = ("claude_api", "extractors", "engine_bits", "diagram",
-                 "summary_pipeline", "ui_components", "modules")
+                 "summary_pipeline", "ui_components", "modules",
+                 # IM 회사양식(2026-10-07) — 이름이 흔해서 다른 도구와 겹칠 수 있다
+                 "engine", "pages", "pdf_input", "docx_repair")
 
 
 def open_tool(key: str):
