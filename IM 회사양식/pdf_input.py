@@ -404,6 +404,98 @@ def _apply(page, images=True, graphics="covered", text=True):
         page.apply_redactions(images=kw["images"])
 
 
+# ──────────────────────────────────────────────
+# 글씨를 그림으로 그린 PDF 바로잡기
+# ──────────────────────────────────────────────
+# ★성수동(2026-10-08): 파워포인트 글자 효과로 만든 PDF 는 보이는 글씨가 '2×2 색 그림 + 글자 모양 마스크' 이고
+#   진짜 글씨는 그 위에 투명도 0 으로 깔려 있다(쪽마다 그림 260~480개). pdf2docx 가 이 그림을 하나하나 풀다가
+#   한 쪽에 몇 분씩 걸려 웹에서 10분 넘게 안 끝났고, 끝나도 워드에 글씨가 두 번(그림+글) 나온다.
+#   → 그 그림을 빼고 진짜 글씨를 그림 색으로 보이게 한다(굵게 보이던 테두리 칠도 같은 색). 2쪽 60초+ → 0.5초.
+TINY_PX = 4                                        # 이 이하 크기의 그림만 '색 칠용' 으로 본다
+HEAVY_IMAGES = 150                                 # 한 쪽 그림 조각이 이만큼 넘으면 쪽 통째 그림으로(샘플 17개 중 성수동 15쪽만)
+_NUM = r"-?(?:\d+\.?\d*|\.\d+)"
+
+
+def _alpha0_states(doc, page):
+    """투명도 0(ca 0 / CA 0) 그리기 상태 이름들 — 안 보이게 깐 글씨에 쓰인다."""
+    out = set()
+    try:
+        val = doc.xref_get_key(page.xref, "Resources/ExtGState")[1]
+    except Exception:
+        return out
+    for name, xr in re.findall(r"/([\w.\-]+)\s+(\d+)\s+0\s+R", val or ""):
+        if re.search(r"/(ca|CA)\s+0(?:\.0+)?(?![\d.])", doc.xref_object(int(xr))):
+            out.add(name)
+    return out
+
+
+def _image_kind(doc, x, cache):
+    """'gone' = 마스크가 전부 0(완전히 안 보이는 그림), (r,g,b) = 마스크 있는 아주 작은 색 그림, None = 그대로."""
+    xref, smask, w, h = x[0], x[1], x[2], x[3]
+    if xref not in cache:
+        k = None
+        try:
+            if smask and max(fitz.Pixmap(doc, smask).samples or b"\0") == 0:
+                k = "gone"
+            elif smask and w <= TINY_PX and h <= TINY_PX:
+                pix = fitz.Pixmap(doc, xref)
+                if not pix.colorspace or pix.colorspace.n != 3:
+                    pix = fitz.Pixmap(fitz.csRGB, pix)
+                s, n, m = pix.samples, pix.n, pix.width * pix.height
+                k = tuple(sum(s[i + c] for i in range(0, len(s), n)) / m / 255 for c in range(3))
+        except Exception:
+            k = None
+        cache[xref] = k
+    return cache[xref]
+
+
+def fix_image_text(doc):
+    """그림으로 그린 글씨 → 진짜 글씨로. 바꾼 개수를 돌려준다.
+    진짜 글씨가 바로 뒤에 투명하게 깔려 있을 때만 바꾸고, 아니면 그림을 그대로 둔다."""
+    cache, done = {}, 0
+    for page in doc:
+        names = {}
+        for x in page.get_images(full=True):
+            if x[9] == 0:                              # 쪽 내용에 바로 붙은 그림만(폼 안 그림은 안 건드림)
+                k = _image_kind(doc, x, cache)
+                if k is not None:
+                    names[x[7]] = k
+        if not names:
+            continue
+        hidden = _alpha0_states(doc, page)
+        page.clean_contents()
+        cx = page.get_contents()[0]
+        s = doc.xref_stream(cx).decode("latin-1")
+        pat = re.compile(r"/(" + "|".join(re.escape(n) for n in names) + r")\s*Do\b")
+        out, pos, n = [], 0, 0
+        for m in pat.finditer(s):
+            if m.start() < pos:
+                continue
+            k = names[m.group(1)]
+            if k == "gone":
+                out.append(s[pos:m.start()] + " ")
+                pos, n = m.end(), n + 1
+                continue
+            bt = s.find("BT", m.end())
+            et = s.find("ET", bt) if bt >= 0 else -1
+            seg = s[bt:et] if et > 0 else ""
+            if (not seg or bt - m.end() > 600 or pat.search(s, m.end(), bt)
+                    or not any(re.search(r"/" + re.escape(h) + r"\s+gs", seg) for h in hidden)):
+                continue
+            for h in hidden:
+                seg = re.sub(r"/" + re.escape(h) + r"\s+gs", " ", seg)
+            seg = re.sub(r"\b[37]\s+Tr\b", "0 Tr", seg)                # 3·7 = 안 그리는 글씨
+            seg = re.sub(r"(?:%s\s+){1,4}(?:g|rg|k|sc|scn|G|RG|K|SC|SCN)\b" % _NUM, " ", seg)
+            seg = seg.replace("BT", "BT %.4f %.4f %.4f rg %.4f %.4f %.4f RG " % (k + k), 1)
+            out.append(s[pos:m.start()] + " " + s[m.end():bt] + seg)
+            pos, n = et, n + 1
+        out.append(s[pos:])
+        if n:
+            doc.update_stream(cx, "".join(out).encode("latin-1"))
+            done += n
+    return done
+
+
 def content_box(page):
     """띠를 지운 뒤 쪽에 남은 내용(글·그림·선)의 범위."""
     r = fitz.Rect()
@@ -424,21 +516,41 @@ def content_box(page):
 # 워드로 바꾸고 규격 맞추기
 # ──────────────────────────────────────────────
 class _CatchIgnored(logging.Handler):
-    def __init__(self):
+    """pdf2docx 기록에서 '버린 쪽' 을 모으고, 진행 상황을 progress(0~1, 글) 로 알린다."""
+    def __init__(self, progress=None):
         super().__init__()
         self.pages = []
+        self.progress = progress
+        self.stage = 0
 
     def emit(self, record):
-        m = re.search(r"Ignore page (\d+)", record.getMessage())
+        msg = record.getMessage()
+        m = re.search(r"Ignore page (\d+)", msg)
         if m:
             self.pages.append(int(m.group(1)))
+        if not self.progress:
+            return
+        if "[3/4]" in msg:
+            self.stage = 3
+        elif "[4/4]" in msg:
+            self.stage = 4
+        m = re.match(r"\((\d+)/(\d+)\) Page", msg)
+        if m and self.stage in (3, 4):
+            i, n = int(m.group(1)), int(m.group(2))
+            if self.stage == 3:
+                self.progress(0.05 + 0.65 * i / n, f"원본 읽는 중… {i} / {n}쪽")
+            else:
+                self.progress(0.70 + 0.25 * i / n, f"워드에 옮기는 중… {i} / {n}쪽")
 
 
-def convert(pdf_bytes, drop_cover=True, drop_last=None):
+def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None):
     """PDF bytes → (docx bytes, 보고 dict).
 
     보고['쪽'] = 결과 구역 순서대로 원본 쪽 번호(1부터)·줄인 비율·쓰인 높이(pt)·그림으로 넣었는지.
+    progress(비율 0~1, 글) 를 주면 진행 상황을 알린다.
     """
+    if progress:
+        progress(0.01, "원본 정리하는 중… (머리말·꼬리말·연락처 지우기)")
     import docx
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     n = doc.page_count
@@ -451,6 +563,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None):
     if drop_cover and n > 1:
         keep.remove(0)
     rep["원본 끝쪽 뺌"], rep["원본 표지 뺌"] = bool(drop_last and n > 2), bool(drop_cover and n > 1)
+    rep["그림 글씨 고침"] = fix_image_text(doc)
     leftover = []
     rep["머리말·꼬리말 지운 쪽"] = strip_repeating_bands(doc, leftover)
     # 원본 담당자 연락처(어느 쪽이든)·머리말 띠의 로고(한 쪽에만 있어도) — 2026-10-08 사용자 확정
@@ -458,12 +571,19 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None):
     rep["로고 지운 쪽"] = [i + 1 for i in keep if strip_band_logos(doc[i])]
     boxes = [content_box(doc[i]) for i in range(n)]
     sizes = [(doc[i].rect.width, doc[i].rect.height) for i in range(n)]
-    doc.select(keep)
+    # 그림 조각이 아주 많은 쪽(성수동 15쪽 지도 = 조각 237개) 은 pdf2docx 가 한 쪽에 몇 분씩 걸린다 → 처음부터 쪽 그림으로
+    heavy = {i for i in keep if len(doc[i].get_image_info()) >= HEAVY_IMAGES}
+    rep["그림 조각 많아 그림으로"] = [i + 1 for i in sorted(heavy)]
+    conv = [i for i in keep if i not in heavy]
+    doc.select(conv)
 
     from pdf2docx import Converter
     import docx.table as _dt
-    catcher = _CatchIgnored()
-    logging.getLogger().addHandler(catcher)
+    catcher = _CatchIgnored(progress)
+    root = logging.getLogger()
+    old_level = root.level
+    root.addHandler(catcher)
+    root.setLevel(min(old_level or logging.INFO, logging.INFO))     # 쪽 진행 기록(INFO)까지 받도록
     # ★pdf2docx 는 표 칸 합치기가 하나라도 겹치면 **그 쪽을 통째로 버린다**('Ignore page …').
     #   안산 8쪽('정보통신업 사업자 관련 설명' 표)·33쪽이 원본 그대로도 이렇게 빠졌다(2026-10-08).
     #   → 바꾸는 동안만, 합치기가 안 되는 칸 하나는 합치지 않고 넘어가게 해 표 나머지를 살린다.
@@ -489,9 +609,12 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None):
             with open(dst, "rb") as f:
                 raw = f.read()
     finally:
-        logging.getLogger().removeHandler(catcher)
+        root.removeHandler(catcher)
+        root.setLevel(old_level)
         _dt._Cell.merge = _orig_merge
-    ignored = {keep[p - 1] for p in catcher.pages if 0 < p <= len(keep)}
+    if progress:
+        progress(0.96, "회사 양식 크기에 맞추는 중…")
+    ignored = {conv[p - 1] for p in catcher.pages if 0 < p <= len(conv)} | heavy
 
     d = docx.Document(io.BytesIO(raw))
     rep["워드에서 지운 머리말 줄"] = drop_paragraphs(d, set(leftover))

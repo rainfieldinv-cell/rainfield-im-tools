@@ -388,13 +388,18 @@ elif step == 3:
                      photos[pick]["blob"] if pick is not None and 0 <= pick < len(photos) else None)
             bond = {r: SS.get(f"cf_bond_{r}", "") for r in BOND_ROWS}
             try:
-                with st.spinner("만드는 중입니다… (30쪽 기준 1~2분)"):
-                    body, rep1 = pdf_input.convert(SS["cf_bytes"], drop_cover=SS.get("cf_drop_cover", True),
-                                                   drop_last=SS.get("cf_drop_tail", False))
-                    place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])
-                    out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
-                                             header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
-                                             photo=photo, bond=bond, bond_place=place)
+                bar = st.progress(0.0, text="만드는 중입니다… 이 화면을 닫지 말고 기다려 주세요.")
+
+                def _prog(v, msg):
+                    bar.progress(min(max(v, 0.0), 1.0), text=f"만드는 중입니다… {msg}")
+                body, rep1 = pdf_input.convert(SS["cf_bytes"], drop_cover=SS.get("cf_drop_cover", True),
+                                               drop_last=SS.get("cf_drop_tail", False), progress=_prog)
+                _prog(0.98, "표지·사모사채 개요·연락처 넣는 중…")
+                place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])
+                out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
+                                         header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
+                                         photo=photo, bond=bond, bond_place=place)
+                bar.empty()
                 SS["cf_out"] = out
                 SS["cf_rep"] = {**rep1, **rep2}
             except Exception:
