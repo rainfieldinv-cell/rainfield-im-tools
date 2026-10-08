@@ -107,7 +107,7 @@ def _prepare(name, data):
     SS["cf_highlight"] = info["highlight"]
     SS["cf_drop_cover"] = True
     SS["cf_drop_tail"] = bool(info["last_contact"])
-    for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs"):
+    for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages"):
         SS.pop(k, None)
 
 
@@ -315,14 +315,44 @@ elif step == 3:
         st.write(f"**{SS.get('cf_name', '')}** · {n}쪽 · 표지 제목 : **{SS.get('cf_title1', '')} "
                  f"{SS.get('cf_title2', '')}** · 사모사채 개요 : {len(filled)}/{len(BOND_ROWS)}칸 채움")
 
+        # ★회사 사람들이 처음 봐도 알게 자세히(사용자 지적 2026-10-08) — '마지막 쪽 빼기' 를 '하나 빠뜨린
+        #   체크' 로 보고 본문 쪽(성수동 66쪽 인허가 일정)을 체크한 일이 있었다. 쪽 그림을 옆에 보여 준다.
         st.markdown("#### 원본에서 뺄 쪽")
-        SS["cf_drop_cover"] = st.checkbox("원본 1쪽(증권사 표지)을 빼고 회사 표지로 바꾸기",
-                                          value=SS.get("cf_drop_cover", True), key="w_cf_drop_cover")
-        SS["cf_drop_tail"] = st.checkbox(
-            f"원본 마지막 쪽({n}쪽, 증권사 연락처)을 빼기"
-            + (" — 메일·전화번호가 있어 연락처 쪽으로 보입니다" if info.get("last_contact")
-               else " — 연락처 쪽으로 보이지 않습니다(본문일 수 있으니 확인하세요)"),
-            value=SS.get("cf_drop_tail", False), key="w_cf_drop_tail")
+        st.info(
+            "**✅ 체크하지 않아도 자동으로 빼는 것** — 따로 하실 일 없습니다.\n"
+            "- 원본 모든 쪽의 **위쪽 머리말·아래쪽 꼬리말**(증권사 이름·사업명·로고·'Confidential' 문구)\n"
+            "- 원본 **쪽번호** (결과물에는 회사 양식 쪽번호가 새로 들어갑니다)\n"
+            "- 원본 **담당자 연락처**(이름·직급·전화·메일 묶음) — 어느 쪽에 있든\n\n"
+            "※ 본문 안의 표·그림은 손대지 않습니다. 그림 **안에** 그려진 증권사 로고(금융구조도의 참여사 표시 등)도 "
+            "딜 내용이라 그대로 둡니다.\n\n"
+            "**☑️ 아래 두 칸은 '쪽을 통째로' 빼는 것**이라 쪽 그림을 보고 직접 정해 주세요.")
+        if "cf_edge_pages" not in SS:
+            SS["cf_edge_pages"] = (pdf_input.page_png(SS["cf_bytes"], 0, zoom=0.3),
+                                   pdf_input.page_png(SS["cf_bytes"], n - 1, zoom=0.3))
+        e1, e2 = st.columns(2)
+        with e1:
+            ic, tc = st.columns([1, 3])
+            ic.image(SS["cf_edge_pages"][0], caption="원본 1쪽", use_container_width=True)
+            with tc:
+                SS["cf_drop_cover"] = st.checkbox("원본 1쪽(증권사 표지)을 빼고 회사 표지로 바꾸기",
+                                                  value=SS.get("cf_drop_cover", True), key="w_cf_drop_cover")
+                st.caption("거의 모든 IM 은 1쪽이 증권사 표지라 처음부터 체크돼 있습니다. "
+                           "1쪽이 표지가 아니라 본문이면 체크를 풀어 주세요.")
+        with e2:
+            ic, tc = st.columns([1, 3])
+            ic.image(SS["cf_edge_pages"][1], caption=f"원본 마지막 쪽({n}쪽)", use_container_width=True)
+            with tc:
+                SS["cf_drop_tail"] = st.checkbox(
+                    f"원본 마지막 쪽({n}쪽)을 통째로 빼기 — 증권사 연락처만 있는 쪽일 때만",
+                    value=SS.get("cf_drop_tail", False), key="w_cf_drop_tail")
+                st.caption(
+                    ("🔎 이 쪽에서 메일·전화번호를 찾아 **연락처 쪽으로 보여 체크해 두었습니다.** "
+                     if info.get("last_contact") else
+                     "🔎 이 쪽은 **연락처 쪽으로 보이지 않아 체크하지 않았습니다.** ")
+                    + "IM 끝에 증권사 담당자 연락처나 'End of Document' 만 있는 쪽이 있으면 그 쪽을 통째로 빼고 "
+                    "회사 연락처 쪽으로 바꾸는 칸입니다. **마지막 쪽이 본문(표·설명)이면 체크하지 마세요** — "
+                    "체크하면 그 쪽 내용이 통째로 빠집니다. (본문 쪽 안의 담당자 연락처는 체크하지 않아도 위처럼 "
+                    "자동으로 지웁니다.)")
 
         st.markdown("#### 하이라이트 쪽 (사모사채 개요가 이 뒤에 들어갑니다)")
         found = info.get("highlight") or []
