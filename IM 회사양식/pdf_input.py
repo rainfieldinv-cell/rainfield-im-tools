@@ -172,22 +172,63 @@ def all_photos(pdf_bytes):
 # ──────────────────────────────────────────────
 # 띠 지우기 · 내용 범위 재기
 # ──────────────────────────────────────────────
+EDGE_TOP, EDGE_BOTTOM = 0.055, 0.05   # 쪽 맨 가장자리 여백 — 본문이 안 들어오는 자리
+
+
+def _is_page_no(txt, pno):
+    """쪽번호인가. 숫자만 덜렁 있으면 그 쪽의 실제 번호와 거의 같을 때만(표 숫자 '266' 을 지운 일이 있다)."""
+    if not PAGE_NO_RE.fullmatch(txt):
+        return False
+    if re.search(r"/|of|page|페이지|^[-–]|[-–]$", txt.strip(), re.I):
+        return True
+    nums = re.findall(r"\d+", txt)
+    return len(nums) == 1 and pno - 3 <= int(nums[0]) <= pno + 3
+
+
 def _band_items(page):
     """위·아래 띠 안의 글줄·그림·선을 (종류, 반올림한 자리, 내용, 범위) 로."""
     h = page.rect.height
+    pno = page.number + 1
     top, bot = h * TOP_BAND, h * (1 - BOTTOM_BAND)
     out = []
     for b in page.get_text("dict")["blocks"]:
-        r = fitz.Rect(b["bbox"])
-        if r.y1 <= top or r.y0 >= bot:
-            if b["type"] == 0:
-                txt = "".join(s["text"] for l in b["lines"] for s in l["spans"]).strip()
-                if PAGE_NO_RE.fullmatch(txt):
+        # ★글은 '줄' 단위로 본다 — 덩어리(block) 단위면 머리말이 아래 본문과 한 덩어리로 묶여 띠 밖으로
+        #   잡혀 하나도 안 지워졌다(고산3지구 머리말 249줄 그대로)
+        if b["type"] == 0:
+            units = [(fitz.Rect(l["bbox"]), "".join(s["text"] for s in l["spans"]).strip()) for l in b["lines"]]
+        else:
+            # ★그림은 '내용' 까지 같아야 되풀이로 본다 — 성수동은 제목 숫자('2.', '8.')가 그림 조각인데,
+            #   자리·크기만 보니 숫자가 달라도 같은 그림으로 쳐서 제목 숫자가 지워졌다
+            import hashlib
+            digest = hashlib.md5(b.get("image", b"")[:4096]).hexdigest()[:10]
+            units = [(fitz.Rect(b["bbox"]), "\x00" + digest)]
+        for r, txt in units:
+            if not (r.y1 <= top or r.y0 >= bot):
+                continue
+            if txt is not None and txt.startswith("\x00"):
+                out.append(("i", (round(r.x0 / 6), round(r.y0 / 6), round(r.width / 6)), txt, r))
+                continue
+            if txt is not None:
+                if not txt:
+                    continue
+                # 가로 쪽은 높이가 낮아 5% 가 33pt 밖에 안 된다(성수동 'Ⅰ. Project 개요' 가 남았다) → 최소 40pt
+                # 아래쪽 가장자리는 안 쓴다 — 쪽 바닥까지 내려온 표 숫자('33,389')를 지운 일이 있다(등촌역).
+                #   아래 꼬리말은 '되풀이' 와 쪽번호 규칙으로 잡힌다.
+                edge = r.y1 <= max(h * EDGE_TOP, 40)
+                if edge or _is_page_no(txt.replace("페이지", "page"), pno):
                     # 쪽번호('13 / 14', '- 3 -', 'Page 3')는 자릿수에 따라 자리가 조금씩 달라 '되풀이' 로
-                    # 안 잡혔다(등촌역 13·14쪽에 남음) → 띠 안에 있으면 무조건 지운다
+                    # 안 잡혔다(등촌역 13·14쪽에 남음) → 띠 안에 있으면 무조건 지운다.
+                    # 쪽 맨 가장자리 여백의 글(고산 2쪽 오른쪽 위 머리말)도 한 번만 나와도 지운다.
                     out.append(("pn", (), "", r))
                     continue
                 key = re.sub(r"\d+", "#", txt)            # 쪽번호는 숫자만 다르다
+                if re.fullmatch(r"\s*\d{1,3}\s*", txt):
+                    # 숫자만 있는 줄 — 쪽번호를 본문부터 1로 다시 세는 문서가 있어(고산3지구 5쪽의 '1')
+                    # '높이' 가 여러 쪽에서 같으면 쪽번호로 본다(아래 strip_repeating_bands 에서 센다)
+                    out.append(("num", (round(r.y0 / 4),), "", r))
+                    continue
+                if len(key.strip()) < 4:
+                    continue                               # 'Ⅲ.' '개요' 같은 짧은 제목 조각은 머리말로 안 본다(성수동)
                 out.append(("t", (round(r.x0 / 6), round(r.y0 / 6)), key, r))
             else:
                 out.append(("i", (round(r.x0 / 6), round(r.y0 / 6), round(r.width / 6)), "", r))
@@ -198,29 +239,169 @@ def _band_items(page):
     return out
 
 
-def strip_repeating_bands(doc):
-    """여러 쪽에 같은 자리로 되풀이되는 위·아래 띠 요소를 지운다. 지운 쪽 수를 돌려준다."""
+def _safe_text_targets(doc, pno, rects):
+    """글 줄 지우기를 사본 쪽에서 먼저 해 보고, 다른 본문 글까지 사라지게 하는 줄은 빼고 돌려준다.
+
+    ★PDF 지우기는 글자 '모양 상자' 가 겹치면 지운다. 글꼴 정보가 엉터리로 큰 PDF 에서는 꼬리말 한 줄을
+      지우는데 그 위 표 숫자까지 사라졌다(등촌역 8쪽: '오이코스자산운용 대체투자본부' 를 지우니 '33,389' 도).
+    반환: (지워도 되는 범위들, PDF 에선 못 지운 줄들의 글 — 워드로 바꾼 뒤 지운다)
+    """
+    page = doc[pno]
+    targets = {tuple(r) for r in rects}
+    keep_txt = Counter(t for r, t in _lines(page) if tuple(r) not in targets)
+    ok, skipped = [], []
+    for r in rects:
+        tmp = fitz.open()
+        tmp.insert_pdf(doc, from_page=pno, to_page=pno)
+        tp = tmp[0]
+        tp.add_redact_annot(r, fill=False)
+        _apply(tp, images=False, graphics=None, text=True)
+        after = Counter(t for rr, t in _lines(tp))
+        lost = keep_txt - after
+        if lost:
+            skipped.append(next((t for rr, t in _lines(page) if tuple(rr) == tuple(r)), ""))
+        else:
+            ok.append(r)
+    return ok, [t for t in skipped if t]
+
+
+def strip_repeating_bands(doc, skipped=None):
+    """여러 쪽에 같은 자리로 되풀이되는 위·아래 띠 요소를 지운다. 지운 쪽 수를 돌려준다.
+
+    skipped(list) 를 주면 PDF 에서 안전하게 못 지운 머리말·꼬리말 글을 거기 모은다(워드로 바꾼 뒤 지운다).
+    """
     per_page = [_band_items(p) for p in doc]
     cnt = Counter()
     for items in per_page:
         cnt.update({(k, pos, key) for k, pos, key, _ in items})
     need = max(2, int(doc.page_count * REPEAT))
     rep = {sig for sig, c in cnt.items() if c >= need}
+    # ★같은 머리말 글이라도 쪽마다 자리가 조금 다를 수 있다(고산3지구 2쪽 DISCLAIMER 의 오른쪽 위 머리말).
+    #   → 글은 '자리' 를 빼고 '내용' 만으로도 되풀이를 센다.
+    txt_cnt = Counter()
+    for items in per_page:
+        txt_cnt.update({key for k, pos, key, _ in items if k == "t" and len(key) >= 8})
+    rep_txt = {key for key, c in txt_cnt.items() if c >= need}
+    num_cnt = Counter()
+    for items in per_page:
+        num_cnt.update({pos for k, pos, key, _ in items if k == "num"})
     touched = 0
     for page, items in zip(doc, per_page):
-        rects = [r for k, pos, key, r in items if k == "pn" or (k, pos, key) in rep]
-        if not rects:
+        hit = [(k, r) for k, pos, key, r in items
+               if k == "pn" or (k, pos, key) in rep or (k == "t" and key in rep_txt)
+               or (k == "num" and num_cnt[pos] >= max(3, need // 2))]
+        if not hit:
             continue
-        for r in rects:
-            # fill=False — 흰 네모로 덮으면 pdf2docx 가 그 네모를 빈 표로 만든다(실제: 등촌역 쪽마다 빈 표)
+        # ★두 번에 나눠 지운다. 한 번에 지우면 선·그림 자리에 걸친 **글자까지** 지워진다
+        #   (성수동: 쪽마다 같은 자리의 제목 밑줄을 지우다 그 위 제목 '2. 개발계획' 이 같이 사라졌다).
+        #   ① 글 줄 → 글만  ② 선·그림 → 그 도형만(글은 그대로)
+        # fill=False — 흰 네모로 덮으면 pdf2docx 가 그 네모를 빈 표로 만든다(실제: 등촌역 쪽마다 빈 표)
+        texts = [r for k, r in hit if k in ("t", "pn", "num")]
+        # ★선·그림은 그 쪽 본문 글보다 위(위 띠) / 아래(아래 띠)에 있을 때만 머리말·꼬리말로 본다.
+        #   제목 아래 밑줄처럼 본문 사이에 끼어 있으면 쪽마다 같은 자리여도 본문 장식이다(성수동 제목 밑줄).
+        hit_txt = set(map(tuple, texts))
+        body = [r for r, t in _lines(page) if tuple(r) not in hit_txt]
+        h = page.rect.height
+        top_body = min((r.y0 for r in body if r.y0 < h * 0.5), default=h)
+        bot_body = max((r.y1 for r in body if r.y1 > h * 0.5), default=0)
+        shapes = [r for k, r in hit if k not in ("t", "pn", "num")
+                  and ((r.y1 <= h * 0.5 and r.y1 <= top_body + 2) or (r.y0 > h * 0.5 and r.y0 >= bot_body - 2))]
+        if texts:
+            texts, miss = _safe_text_targets(doc, page.number, texts)
+            if skipped is not None:
+                skipped.extend(miss)
+            for r in texts:
+                page.add_redact_annot(r, fill=False)
+            if texts:
+                _apply(page, images=False, graphics=None, text=True)
+        # ★선은 '걸치기만 해도' 지운다 — 원본 머리말 밑줄이 쪽 바깥(x=-1)까지 그어져 있어 '완전히 든 것만' 으로는
+        #   안 지워졌다(등촌역). 본문보다 위·아래에 있는 것만 골랐으므로 본문 선은 건드리지 않는다.
+        #   그림은 하나씩 따로 지운다 — 딱 붙은 두 조각을 한 번에 지우니 하나가 남았다(등촌역 머리말 장식).
+        for r in shapes:
             page.add_redact_annot(r + (-1, -1, 1, 1), fill=False)
-        try:
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE,
-                                  graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
-        except TypeError:                                   # 옛 판에는 graphics 인자가 없다
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_REMOVE)
+            _apply(page, images=True, graphics="touched", text=False)
         touched += 1
     return touched
+
+
+ROLE_RE = re.compile(r"담당|팀장|부장|차장|과장|대리|주임|사원|이사|상무|전무|본부|부서|팀\b|연락처|문의|"
+                     r"tel|e-?mail|mobile|fax|contact|휴대|전화|이메일", re.I)
+
+
+def _lines(page):
+    out = []
+    for b in page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            t = "".join(s["text"] for s in l["spans"]).strip()
+            if t:
+                out.append((fitz.Rect(l["bbox"]), t))
+    return out
+
+
+def strip_contacts(page):
+    """원본 증권사 담당자 연락처 묶음(이름·직급·전화·메일)을 지운다 — 어느 쪽에 있든(2026-10-08 사용자 확정).
+
+    메일·전화번호가 2개 이상인 줄들을 씨앗으로, 위아래로 바짝 붙은(30pt 안) 이름·직급·'담당 부서' 줄까지
+    넓힌 범위의 글·선·배경·그림을 지운다. 떨어져 있는 본문 문단은 건드리지 않는다.
+    (실제: 고산3지구 2쪽 DISCLAIMER 아래 '금융조달 담당 부서 – 키움증권 …' 4명 연락처)
+    반환: 지웠으면 True
+    """
+    lines = _lines(page)
+    hits = [(r, t) for r, t in lines if EMAIL_RE.search(t) or PHONE_RE.search(t)]
+    found = set()
+    for _, t in hits:
+        found |= set(EMAIL_RE.findall(t)) | set(PHONE_RE.findall(t))
+    if len(found) < 2:
+        return False
+    box = fitz.Rect()
+    for r, _ in hits:
+        box |= r
+    grew = True
+    while grew:
+        grew = False
+        for r, t in lines:
+            if r in box or box.contains(r):
+                continue
+            near = (0 <= box.y0 - r.y1 <= 30) or (0 <= r.y0 - box.y1 <= 30) or r.intersects(box)
+            if near and (ROLE_RE.search(t) or len(t) <= 14):
+                box |= r
+                grew = True
+    box = box + (-8, -6, 8, 6)
+    # 연락처 묶음에 걸친 얇은 띠·선(제목 줄 회색 배경, 칸 선)도 함께 — 큰 테두리는 건드리지 않는다
+    for d in page.get_drawings():
+        r = d["rect"]
+        if r.intersects(box) and r.height < 40 and r.width < page.rect.width * 0.95:
+            box |= r
+    page.add_redact_annot(box, fill=False)
+    _apply(page, images=True, graphics="covered", text=True)
+    return True
+
+
+def strip_band_logos(page):
+    """위·아래 머리말 띠 안의 작은 그림(로고)을 지운다 — 한 쪽에만 있어도(되풀이 여부 상관없이)."""
+    h, w = page.rect.height, page.rect.width
+    n = 0
+    for info in page.get_image_info():
+        r = fitz.Rect(info["bbox"])
+        in_band = r.y1 <= h * TOP_BAND or r.y0 >= h * (1 - BOTTOM_BAND)
+        if in_band and r.width < w * 0.35 and r.height < h * 0.10:
+            page.add_redact_annot(r + (-1, -1, 1, 1), fill=False)
+            n += 1
+    if n:
+        _apply(page, images=True, graphics=None, text=False)
+    return n
+
+
+def _apply(page, images=True, graphics="covered", text=True):
+    """지우기 실행. graphics: None(선 안 건드림) / 'covered'(범위에 완전히 든 선만) / 'touched'(걸친 선도)."""
+    kw = {"images": fitz.PDF_REDACT_IMAGE_REMOVE if images else fitz.PDF_REDACT_IMAGE_NONE,
+          "graphics": {"covered": fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
+                       "touched": fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED}.get(graphics, fitz.PDF_REDACT_LINE_ART_NONE),
+          "text": fitz.PDF_REDACT_TEXT_REMOVE if text else fitz.PDF_REDACT_TEXT_NONE}
+    try:
+        page.apply_redactions(**kw)
+    except TypeError:                                       # 옛 판에는 graphics·text 인자가 없다
+        page.apply_redactions(images=kw["images"])
 
 
 def content_box(page):
@@ -270,7 +451,11 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None):
     if drop_cover and n > 1:
         keep.remove(0)
     rep["원본 끝쪽 뺌"], rep["원본 표지 뺌"] = bool(drop_last and n > 2), bool(drop_cover and n > 1)
-    rep["머리말·꼬리말 지운 쪽"] = strip_repeating_bands(doc)
+    leftover = []
+    rep["머리말·꼬리말 지운 쪽"] = strip_repeating_bands(doc, leftover)
+    # 원본 담당자 연락처(어느 쪽이든)·머리말 띠의 로고(한 쪽에만 있어도) — 2026-10-08 사용자 확정
+    rep["연락처 지운 쪽"] = [i + 1 for i in keep if strip_contacts(doc[i])]
+    rep["로고 지운 쪽"] = [i + 1 for i in keep if strip_band_logos(doc[i])]
     boxes = [content_box(doc[i]) for i in range(n)]
     sizes = [(doc[i].rect.width, doc[i].rect.height) for i in range(n)]
     doc.select(keep)
@@ -309,6 +494,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None):
     ignored = {keep[p - 1] for p in catcher.pages if 0 < p <= len(keep)}
 
     d = docx.Document(io.BytesIO(raw))
+    rep["워드에서 지운 머리말 줄"] = drop_paragraphs(d, set(leftover))
     rep["줄바꿈 탭 고침"] = fix_wrap_tabs(d)
     rep["기호 글꼴 고침"] = fix_symbol_runs(d)
     done = [k for k in keep if k not in ignored]
@@ -342,6 +528,27 @@ def _section_groups(d):
             cur = []
     groups.append(cur)
     return groups
+
+
+def drop_paragraphs(d, texts):
+    """PDF 에서 안전하게 못 지운 머리말·꼬리말 줄을 워드에서 지운다(그 글과 똑같은 문단만, 표 밖만)."""
+    from docx.oxml.ns import qn
+    if not texts:
+        return 0
+    want = {re.sub(r"\s+", "", t) for t in texts}
+    n = 0
+    # 머리말·꼬리말은 늘 그 쪽(구역)의 맨 처음·맨 끝에 있다 → 구역마다 글 있는 문단 앞뒤 3개만 본다
+    #   (숫자만 있는 쪽번호 '30' 이 본문 어딘가의 '30' 문단까지 지우지 않게)
+    for grp in _section_groups(d):
+        paras = [e for e in grp if e.tag == qn("w:p") and "".join(x.text or "" for x in e.iter(qn("w:t"))).strip()]
+        for p in paras[:3] + paras[-3:]:
+            if p.getparent() is None:
+                continue
+            t = re.sub(r"\s+", "", "".join(x.text or "" for x in p.iter(qn("w:t"))))
+            if t and t in want and p.find(qn("w:pPr") + "/" + qn("w:sectPr")) is None:
+                p.getparent().remove(p)
+                n += 1
+    return n
 
 
 def fix_wrap_tabs(d):

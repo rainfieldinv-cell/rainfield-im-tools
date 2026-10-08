@@ -146,12 +146,30 @@ if step == 1:
     st.caption("받은 IM 의 **PDF** 를 올리세요. 원본 한 쪽이 결과 한 쪽으로 그대로 옮겨지고, "
                "쪽 크기만 회사 양식(A4)에 맞춥니다.")
 
-    c1, c2 = st.columns(2)
-    c1.success("**그대로 두는 것**\n\n- 본문 내용·표·그림\n- 원본 1쪽 = 결과 1쪽\n"
-               "- (원본 쪽이 회사 양식보다 크면 비율 그대로 줄여서 넣습니다)")
-    c2.info("**회사 양식으로 바꾸는 것**\n\n- 표지\n- 위쪽 머리말 · 아래쪽 로고(증권사 것을 빼고 회사 것으로)\n"
-            "- 글꼴(Pretendard)\n- 표 머리글 색(회사 네이비)\n- 맨 끝 연락처 쪽\n\n"
-            "**더하는 것** : Ⅰ. 사모사채 개요 (원본 하이라이트 바로 뒤)")
+    # 두 상자를 같은 높이로(사용자 요청) — st.columns 의 알림 상자는 내용 길이대로 높이가 달라져 직접 그린다
+    st.markdown("""
+    <div style="display:flex;gap:16px;align-items:stretch;margin:4px 0 12px 0;">
+      <div style="flex:1;background:#e8f7ec;border-radius:8px;padding:14px 18px;color:#14532d;">
+        <b>그대로 두는 것</b>
+        <ul style="margin:8px 0 0 0;">
+          <li>본문 내용·표·그림</li>
+          <li>원본 1쪽 = 결과 1쪽</li>
+          <li>(원본 쪽이 회사 양식보다 크면 비율 그대로 줄여서 넣습니다)</li>
+        </ul>
+      </div>
+      <div style="flex:1;background:#e8f1fb;border-radius:8px;padding:14px 18px;color:#0b3a6e;">
+        <b>회사 양식으로 바꾸는 것</b>
+        <ul style="margin:8px 0 0 0;">
+          <li>표지</li>
+          <li>위쪽 머리말 · 아래쪽 로고 · 쪽번호 (원본 증권사 것을 빼고 회사 것으로)</li>
+          <li>원본 담당자 연락처(이름·전화·메일)는 뺍니다</li>
+          <li>글꼴(Pretendard) · 표 머리글 색(회사 네이비)</li>
+          <li>맨 끝 연락처 쪽</li>
+        </ul>
+        <div style="margin-top:8px;"><b>더하는 것</b> : Ⅰ. 사모사채 개요 (원본 하이라이트 바로 뒤)</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     with st.expander("📎 워드 파일밖에 없다면? · 올리면 안 되는 PDF", expanded=False):
         st.markdown(
@@ -372,6 +390,9 @@ elif step == 3:
                 done.append("원본 마지막 쪽(증권사 연락처)을 빼고 회사 연락처 쪽을 넣었습니다.")
             if rep.get("머리말·꼬리말 지운 쪽"):
                 done.append(f"쪽마다 되풀이되던 증권사 머리말·로고·쪽번호를 {rep['머리말·꼬리말 지운 쪽']}쪽에서 지웠습니다.")
+            if rep.get("연락처 지운 쪽"):
+                done.append("원본 담당자 연락처(이름·전화·메일)를 지웠습니다 : "
+                            + ", ".join(f"{p}쪽" for p in rep["연락처 지운 쪽"]) + ".")
             if rep.get("그림으로 넣은 쪽"):
                 done.append("⚠️ 워드로 바꾸지 못해 **원본 쪽을 그림으로** 넣은 쪽 : "
                             + ", ".join(f"{p}쪽" for p in rep["그림으로 넣은 쪽"]) + " (고칠 수 없으니 확인해 주세요).")
