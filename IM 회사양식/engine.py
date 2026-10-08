@@ -120,9 +120,10 @@ def _get(parent, name):
 # 1. 글꼴
 # ──────────────────────────────────────────────
 def _is_symbol(rfonts):
+    """기호 글꼴인가 — pdf2docx 는 'Wingdings-Regular' 처럼 이름 뒤를 붙여 와서 이름 일부로 본다."""
     for k in ("ascii", "hAnsi", "eastAsia", "cs"):
-        v = rfonts.get(qn("w:" + k))
-        if v and v.strip().lower() in SYMBOL_FONTS:
+        v = (rfonts.get(qn("w:" + k)) or "").strip().lower()
+        if v and (v in SYMBOL_FONTS or re.search(r"wingding|webding|symbol|marlett", v)):
             return True
     return False
 
@@ -263,15 +264,56 @@ def _paint_navy(tc):
             _put(rpr, rpr.makeelement(qn("w:color"), {qn("w:val"): "FFFFFF"}))
 
 
+def _is_frame(tbl):
+    """'큰 틀' 표인가 — 맨 윗줄이 표 폭 전체를 덮는 진한 제목 띠 하나.
+
+    예) 안산 '정보통신업 사업자 관련 설명' : 남색 제목 띠 아래에 작은 표 두 개(회색 머리글)가 들어 있다.
+        pdf2docx 는 이걸 표 하나로 합쳐 만들어서, 0번 줄 = 큰 틀 제목, 1번 줄 = 안쪽 표 머리글이 된다.
+    """
+    rows = tbl.findall(qn("w:tr"))
+    if len(rows) < 2:
+        return False
+    first = rows[0].findall(qn("w:tc"))
+    ncols = len(tbl.findall(qn("w:tblGrid") + "/" + qn("w:gridCol"))) or max(len(r.findall(qn("w:tc"))) for r in rows)
+    if len(first) == 1:
+        span = first[0].find(qn("w:tcPr") + "/" + qn("w:gridSpan"))
+        wide = ncols <= 1 or (span is not None and int(span.get(qn("w:val"), "1")) >= ncols - 1)
+    else:
+        wide = False
+    f = _fill(first[0]) if first else None
+    return wide and bool(f) and _lum(f) < 0.5
+
+
 def paint_headers(doc):
-    """머리글 칸을 네이비로. 고친 칸 수를 돌려준다."""
+    """머리글 칸을 회사 네이비로. 고친 칸 수를 돌려준다.
+
+    규칙(사용자 확정)
+      · 보통 표 : 맨 위 1~2줄 머리글은 색이 연해도 네이비 + 흰 글씨(붕어빵과 같다), 진한 칸은 어디 있든 네이비.
+      · 표 안의 표('큰 틀') : **큰 틀 제목 띠만** 회사 네이비. 그 안 작은 표들의 색은 **원본 그대로**(2026-10-08).
+        원본이 이미 네이비여도 회사 네이비(17365D)로 맞춘다.
+    """
     n = 0
-    for tbl in doc.element.body.iter(qn("w:tbl")):
+    body = doc.element.body
+    frames = [t for t in body.iter(qn("w:tbl")) if _is_frame(t)]
+    frame_ids = set(map(id, frames))
+    for tbl in body.iter(qn("w:tbl")):
+        if any(a in frames for a in tbl.iterancestors(qn("w:tbl"))):
+            continue                                          # 큰 틀 안의 표 — 원본 색 그대로
         rows = tbl.findall(qn("w:tr"))
-        if len(rows) < 2:
+        if not rows:
             continue
         cells = [r.findall(qn("w:tc")) for r in rows]
-        if max(len(c) for c in cells) < 2:
+        if tbl in frames:
+            _paint_navy(cells[0][0])
+            n += 1
+            continue
+        if len(rows) < 2 or max(len(c) for c in cells) < 2:
+            for row in cells:                                 # 한 줄짜리 제목 띠 등 — 진한 칸만
+                for tc in row:
+                    f = _fill(tc)
+                    if f and _lum(f) < 0.5 and f != NAVY:
+                        _paint_navy(tc)
+                        n += 1
             continue
         head = set()
         for i, r in enumerate(rows):                      # '머리글 줄 반복' 표시가 된 줄
@@ -459,20 +501,133 @@ def photo_candidates(doc, limit=6):
 # ──────────────────────────────────────────────
 # 4. 회사 양식 붙이기
 # ──────────────────────────────────────────────
-def _crop_to_ratio(blob, ratio):
-    im = Image.open(io.BytesIO(blob)).convert("RGB")
-    w, h = im.size
-    if w / h > ratio:
-        nw = int(h * ratio)
-        im = im.crop(((w - nw) // 2, 0, (w - nw) // 2 + nw, h))
-    else:
-        nh = int(w / ratio)
-        im = im.crop((0, (h - nh) // 2, w, (h - nh) // 2 + nh))
-    if im.width > 2000:
-        im = im.resize((2000, int(2000 / ratio)))
+def _prepare_photo(blob):
+    """표지 사진: **자르지 않는다.** 원본 그대로 두고 화질만 또렷하게(2026-10-08 사용자 확정).
+
+    · 가로 1,800px 보다 작으면 같은 비율로 키운 뒤(인쇄 때 뭉개지지 않게) 윤곽만 살짝 또렷하게 한다.
+    · 다시 저장할 때 화질이 떨어지지 않게 PNG(투명 있으면) 또는 JPEG 95 로 저장.
+    반환: (bytes, (가로px, 세로px))
+    """
+    from PIL import ImageFilter
+    im = Image.open(io.BytesIO(blob))
+    has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+    im = im.convert("RGBA" if has_alpha else "RGB")
+    if im.width < 1800:
+        k = 1800 / im.width
+        im = im.resize((1800, max(1, int(im.height * k))), Image.LANCZOS)
+    im = im.filter(ImageFilter.UnsharpMask(radius=1.2, percent=70, threshold=2))
     out = io.BytesIO()
-    im.save(out, "JPEG", quality=90)
-    return out.getvalue()
+    if has_alpha:
+        im.save(out, "PNG")
+    else:
+        im.save(out, "JPEG", quality=95, subsampling=0)
+    return out.getvalue(), im.size
+
+
+def _anchor_of(node):
+    while node is not None and etree.QName(node).localname not in ("anchor", "inline"):
+        node = node.getparent()
+    return node
+
+
+def _pos_v(anchor):
+    po = anchor.find("wp:positionV/wp:posOffset", NS)
+    return po
+
+
+def _fit_cover_photo(blip_node, pw, ph):
+    """사진을 원본 비율 그대로 '사진 칸' 안에 들어가게 줄이고 가로 가운데에 둔다.
+
+    사진 칸 = 양식 사진 가로 폭 × (사진 윗자리 ~ Disclaimer 상자 위 0.4cm).
+    """
+    anc = _anchor_of(blip_node)
+    if anc is None:
+        return
+    ext = anc.find("wp:extent", NS)
+    max_w = int(ext.get("cx"))
+    top = _pos_v(anc)
+    room = int(anc.get("_room_cy") or ext.get("cy"))
+    w = max_w
+    h = int(w * ph / pw)
+    if h > room:
+        h = room
+        w = int(h * pw / ph)
+    ext.set("cx", str(w))
+    ext.set("cy", str(h))
+    for x in anc.iter("{%s}ext" % NS["a"]):
+        if x.getparent() is not None and etree.QName(x.getparent()).localname == "xfrm":
+            x.set("cx", str(w))
+            x.set("cy", str(h))
+    ph_el = anc.find("wp:positionH", NS)
+    off = ph_el.find("wp:posOffset", NS) if ph_el is not None else None
+    if off is not None:
+        off.text = str(int(off.text) + (max_w - w) // 2)
+    anc.attrib.pop("_room_cy", None)
+
+
+def _text_width_pt(text, size_pt, bold=True):
+    """Pretendard 로 찍었을 때 글 폭(pt) 어림 — 웹에는 글꼴 파일이 없어 글자 종류별 평균 폭으로 잰다."""
+    w = 0.0
+    for ch in text:
+        if ord(ch) >= 0x1100:                 # 한글·한자
+            w += 0.92
+        elif ch == " ":
+            w += 0.28
+        elif ch.isupper() or ch.isdigit():
+            w += 0.64
+        else:
+            w += 0.55
+    return w * size_pt * (1.04 if bold else 1.0)
+
+
+def _layout_cover(els, lines):
+    """제목 상자를 글 길이에 맞춰 늘리고, 그만큼 날짜·사진을 아래로 내린다(2026-10-08 사용자 지적).
+
+    양식 제목 상자는 두 줄 높이다. 둘째 줄이 길어 상자 폭을 넘으면 세 줄 이상이 되는데, 상자가 그대로면
+    아래 날짜와 겹친다(실제: '안산 OUR IDC PF 대출 / 부산_남포동_생활형숙박시설 신축사업 PF대출 후순위').
+    """
+    anchors = [a for el in els for a in el.iter("{%s}anchor" % NS["wp"])]
+    title = date_a = pic = disc = None
+    for a in anchors:
+        t = "".join(x.text or "" for x in a.iter(qn("w:t")))
+        if a.find(".//a:blip", NS) is not None:
+            pic = a
+        elif "Disclaimer" in t:
+            disc = a
+        elif re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}", t):
+            date_a = a
+        elif a.find(".//" + qn("w:txbxContent")) is not None and title is None and \
+                any(l and l in t for l in lines if l):
+            title = a
+    if title is None:
+        return
+    ext = title.find("wp:extent", NS)
+    body_pr = title.find(".//{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}bodyPr")
+    l_ins = int(body_pr.get("lIns", 91440)) if body_pr is not None else 91440
+    r_ins = int(body_pr.get("rIns", 91440)) if body_pr is not None else 91440
+    width_pt = (int(ext.get("cx")) - l_ins - r_ins) / 12700
+    paras = title.find(".//" + qn("w:txbxContent")).findall(qn("w:p"))
+    need = 0
+    for p in paras:
+        txt = "".join(x.text or "" for x in p.iter(qn("w:t")))
+        sizes = [int(s.get(qn("w:val"))) / 2 for s in p.iter(qn("w:sz")) if (s.get(qn("w:val")) or "").isdigit()]
+        size = max(sizes) if sizes else 20
+        if txt.strip():
+            need += max(1, -(-int(_text_width_pt(txt, size)) // max(int(width_pt), 1)))
+    have = sum(1 for p in paras if "".join(x.text or "" for x in p.iter(qn("w:t"))).strip()) or 1
+    per_line = int(ext.get("cy")) // max(len(paras), 1)
+    extra = max(0, need - max(have, len(paras))) * per_line
+    if extra:
+        ext.set("cy", str(int(ext.get("cy")) + extra))
+        for x in title.iter("{%s}ext" % NS["a"]):
+            if x.getparent() is not None and etree.QName(x.getparent()).localname == "xfrm":
+                x.set("cy", str(int(x.get("cy")) + extra))
+        for a in (date_a, pic):
+            if a is not None and _pos_v(a) is not None:
+                _pos_v(a).text = str(int(_pos_v(a).text) + extra)
+    if pic is not None and disc is not None and _pos_v(pic) is not None and _pos_v(disc) is not None:
+        room = int(_pos_v(disc).text) - int(_pos_v(pic).text) - 144000      # Disclaimer 위 0.4cm 띄움
+        pic.set("_room_cy", str(max(room, 360000)))
 
 
 def _set_par_text(p, text):
@@ -501,6 +656,12 @@ def _cover_elements(tpl, doc, title_lines, date_text, photo):
             elif re.search(r"(January|February|March|April|May|June|July|August|September|"
                            r"October|November|December)\s+\d{4}", t):
                 _set_par_text(ps[0], date_text)
+    # 글상자의 '대체 내용'(옛 워드용 VML)은 뺀다 — 상자 크기·자리를 바꿀 때 두 벌을 맞출 필요가 없게.
+    # 지금 워드는 mc:Choice 쪽만 그린다.
+    for el in els:
+        for fb in list(el.iter("{%s}Fallback" % NS["mc"])):
+            fb.getparent().remove(fb)
+    _layout_cover(els, lines)
     # 사진: 원본 rId 를 새 문서의 그림으로 바꾸거나, 사진 없음이면 그림을 뺀다
     tpl_rels = tpl.part.rels
     for el in els:
@@ -516,8 +677,10 @@ def _cover_elements(tpl, doc, title_lines, date_text, photo):
                     if box is not None and box.getparent() is not None:
                         box.getparent().remove(box)
                     break
-                new_rid, _ = doc.part.get_or_add_image(io.BytesIO(_crop_to_ratio(photo, COVER_PHOTO_RATIO)))
+                blob, (pw, ph) = _prepare_photo(photo)
+                new_rid, _ = doc.part.get_or_add_image(io.BytesIO(blob))
                 node.set(attr, new_rid)
+                _fit_cover_photo(node, pw, ph)
     for el in els:
         _import_styles(tpl, doc, el)
         _pin_template_defaults(doc, el)
@@ -831,11 +994,81 @@ def _sect_from_template(tpl, title_page):
     return sp
 
 
-def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, drop_tail,
-          cover_end="auto", tpl_path=None):
-    """원본 워드 bytes → 회사양식 워드 bytes, 보고(dict).
+def _section_groups(doc):
+    """구역마다 블록 묶음(구역은 '문단 안 sectPr' 로 끝나고, 마지막은 본문 sectPr)."""
+    groups, cur = [], []
+    for el in doc.element.body:
+        if el.tag not in (qn("w:p"), qn("w:tbl")):
+            continue
+        cur.append(el)
+        if el.tag == qn("w:p") and el.find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None:
+            groups.append(cur)
+            cur = []
+    groups.append(cur)
+    return groups
 
-    cover_end : 'auto' 면 스스로 찾고, 숫자면 그 블록까지를 원본 표지로 뺀다, None 이면 안 뺀다.
+
+def _holder(sect):
+    """구역 끝 문단(문단 안 sectPr)."""
+    from docx.oxml.parser import OxmlElement            # python-docx 요소로 만들어야 문단 기능이 붙는다
+    p = OxmlElement("w:p")
+    ppr = OxmlElement("w:pPr")
+    p.append(ppr)
+    ppr.append(sect)
+    return p
+
+
+def _place_bond(doc, tpl, bond_els, place):
+    """사모사채 개요를 넣는다(2026-10-08 사용자 확정).
+
+    place = None          → 표지 바로 다음 쪽(하이라이트를 못 찾았을 때)
+    place = (k, same)     → 본문 k 번째 구역(=원본 하이라이트 마지막 쪽) 뒤.
+                            same=True 면 그 쪽 남은 여백에 이어서, False 면 새 쪽.
+    """
+    body = doc.element.body
+    groups = [g for g in _section_groups(doc) if g]
+    if place is None or not groups:
+        first = groups[0][0] if groups else body.find(qn("w:sectPr"))
+        for el in bond_els:
+            first.addprevious(el)
+        first.addprevious(_holder(_sect_from_template(tpl, title_page=False)))
+        return
+    k, same = place
+    k = min(k, len(groups) - 1)
+    grp = groups[k]
+    last = grp[-1]
+    ends_section = last.tag == qn("w:p") and last.find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None
+    if same:
+        # 그 쪽 끝의 빈 문단(pdf2docx 가 쪽 아래를 채운 것)을 걷어내고 바로 뒤에 잇는다
+        for el in reversed(grp[:-1] if ends_section else grp):
+            if el.tag == qn("w:p") and not "".join(el.itertext()).strip() \
+                    and el.find(".//" + qn("w:drawing")) is None:
+                body.remove(el)
+            else:
+                break
+        anchor = last if ends_section else None
+        for el in bond_els:
+            if anchor is not None:
+                anchor.addprevious(el)
+            else:
+                body.find(qn("w:sectPr")).addprevious(el)
+        return
+    if ends_section:
+        for el in reversed(bond_els + [_holder(_sect_from_template(tpl, title_page=False))]):
+            last.addnext(el)
+    else:
+        # 마지막 구역 뒤 — 지금 구역을 닫고(본문 sectPr 복사) 그 뒤에 개요를 둔다
+        sp = body.find(qn("w:sectPr"))
+        sp.addprevious(_holder(copy.deepcopy(sp)))
+        for el in bond_els:
+            sp.addprevious(el)
+
+
+def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_place=None, tpl_path=None):
+    """(PDF 에서 만든) 본문 워드 bytes → 회사양식 워드 bytes, 보고(dict).
+
+    본문은 pdf_input.convert 가 이미 회사 규격(A4·여백)으로 맞춰 둔 것이다.
+    bond_place : _place_bond 참고.
     """
     tpl_path = tpl_path or template_path()
     tpl = docx.Document(tpl_path)
@@ -845,24 +1078,24 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, drop_t
     apply_fonts(doc)
     rep["머리글 칸"] = paint_headers(doc)
 
-    if cover_end == "auto":
-        cover_end, _, _ = find_cover(doc)
-    # 끝쪽은 표지를 빼기 전에 찾는다(블록 번호가 바뀌므로)
-    start, _txt, hits = find_contact_tail(doc)
-    if start is not None and drop_tail:
-        remove_tail(doc, start)
-        rep["원본 끝쪽 뺌"] = True
-    else:
-        rep["원본 끝쪽 뺌"] = False
-    rep["원본 표지 뺌"] = remove_cover(doc, cover_end)
-    strip_trailing_break(doc)
-
     body = doc.element.body
     # 원본 구역들: 쪽번호를 처음부터 다시 세는 설정 지우기(표지부터 이어 세게)
     for sp in body.iter(qn("w:sectPr")):
         pn = sp.find(qn("w:pgNumType"))
         if pn is not None:
             pn.attrib.pop(qn("w:start"), None)
+
+    # ── 사모사채 개요: 하이라이트 뒤 ──
+    bond_els = _build_bond_section(doc, bond)
+    for el in bond_els:
+        body.remove(el)
+    if bond_place is not None and bond_place[1]:
+        h = bond_els[0]                                     # 같은 쪽에 이을 때는 위와 조금 띄운다
+        ppr = _first_child(h, "pPr")
+        _put(ppr, ppr.makeelement(qn("w:spacing"), {qn("w:before"): "480", qn("w:after"): "200"}))
+    _place_bond(doc, tpl, bond_els, bond_place)
+    rep["개요 자리"] = ("표지 다음 쪽" if bond_place is None else
+                      f"하이라이트 뒤 {'같은 쪽에 이어서' if bond_place[1] else '새 쪽'}")
 
     # ── 맨 뒤: 연락처 쪽(세로 A4 구역) ──
     old_last = body.find(qn("w:sectPr"))
@@ -877,18 +1110,15 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, drop_t
         body.remove(el)
         body.insert(list(body).index(body.find(qn("w:sectPr"))), el)
 
-    # ── 맨 앞: 회사 표지 + 사모사채 개요(제목 있는 쪽) ──
+    # ── 맨 앞: 회사 표지(혼자 한 쪽) ──
     _merge_nsmap(doc, tpl)
     body = doc.element.body
     cover = _cover_elements(tpl, doc, title_lines, date_text, photo)
-    bond_els = _build_bond_section(doc, bond)
-    for el in bond_els:
-        body.remove(el)
-    end = etree.SubElement(body, qn("w:p"))
-    body.remove(end)
-    eppr = etree.SubElement(end, qn("w:pPr"))
-    eppr.append(_sect_from_template(tpl, title_page=True))
-    for i, el in enumerate(cover + bond_els + [end]):
+    # 양식 표지 두 번째 문단 끝의 '쪽 나눔' 은 뺀다 — 구역 끝 문단이 새 쪽을 연다(빈 쪽 방지)
+    for br in list(cover[-1].iter(qn("w:br"))):
+        if br.get(qn("w:type")) == "page":
+            br.getparent().remove(br)
+    for i, el in enumerate(cover + [_holder(_sect_from_template(tpl, title_page=True))]):
         body.insert(i, el)
 
     # ── 머리말·꼬리말: 첫 구역에만 넣고 나머지는 '앞과 같게' ──

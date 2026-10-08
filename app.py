@@ -5,7 +5,7 @@ IM 관련 도구 세 개를 한 주소에서 쓴다. (계약서 도구와 같은
   📑 IM 변환기      → 기존 IM/app.py            원본 IM(PDF) → 회사 양식 제안서 전체
   📄 IM 요약본      → IM 요약본/summary_app.py  원본 IM(PDF) → 4~5장 요약본
   🖨️ IM Decalcomania → IM 붕어빵/app.py          원본 IM(PDF) → 생긴 그대로 고칠 수 있는 PPT
-  📝 IM 회사양식    → IM 회사양식/app.py        원본 IM(워드·PDF) → 내용 그대로 + 회사 양식, 워드
+  📝 IM 회사양식    → IM 회사양식/app.py        원본 IM(PDF) → 내용 그대로 + 회사 양식, 워드
   (폴더 이름은 2026-10-06 convert/summary/decalco 에서 한글로 바꿨다)
 
 ★세 도구의 코드는 각자 폴더에 **그대로** 둔다. 합치면서 코드를 뜯어고치면
@@ -71,7 +71,7 @@ TOOLS = {
         "name": "IM 회사양식",
         "desc": "받은 IM을 <b>내용 그대로</b> 두고 <b>회사 양식만</b> 입혀 "
                 "워드로 만듭니다. 사모사채 개요도 넣습니다.",
-        "need": "필요한 파일 : 원본 IM(워드·PDF) 1개",
+        "need": "필요한 파일 : 원본 IM(PDF) 1개",
         "dir": "IM 회사양식",
         "file": "app.py",
     },
