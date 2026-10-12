@@ -16,7 +16,9 @@ import zipfile
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "형식_1.docx")
+SRC = os.path.join(HERE, "회사양식_틀(최종).docx")          # 2026-10-12 사용자 최종 양식(하이라이트 쪽 포함)
+if not os.path.exists(SRC):
+    SRC = os.path.join(HERE, "형식_1.docx")
 DST = os.path.join(HERE, "회사양식_틀.docx")
 
 
@@ -28,7 +30,8 @@ def main():
     body_imgs = set(re.findall(r'Target="(media/[^"]+)"', rels))     # 본문(표지) 그림만 — 머리말·꼬리말 로고는 둔다
     for item in zin.infolist():
         data = zin.read(item.filename)
-        if item.filename.startswith("word/media/") and item.filename[5:] in body_imgs:
+        if item.filename.startswith("word/media/") and item.filename[5:] in body_imgs and len(data) > 50000:
+            # 사진(표지 조감도·하이라이트 지도)만 회색으로 — 작은 그림(체크 아이콘 등)은 양식 그대로
             im = Image.new("RGB", (40, 20), (200, 200, 200))         # 표지 조감도 → 회색 빈 그림
             b = io.BytesIO()
             fmt = "PNG" if item.filename.lower().endswith(".png") else "JPEG"
@@ -40,7 +43,7 @@ def main():
                 x = x.replace(old, new)
             # 사모사채 개요 표의 내용 칸 글을 지운다(구분 칸은 둔다)
             x = re.sub(r"(<w:tbl>.*?사모사채명.*?</w:tbl>)", _clear_values, x, count=1, flags=re.S)
-            data = x.encode("utf-8")
+            data = _clear_highlight(x.encode("utf-8"))
         elif re.match(r"word/header\d+\.xml$", item.filename):
             x = data.decode("utf-8")
             x = re.sub(r"(<w:t(?: [^>]*)?>)([^<]*)(</w:t>)",
@@ -50,9 +53,7 @@ def main():
             data = x.encode("utf-8")
         elif re.match(r"word/footer\d+\.xml$", item.filename):
             # 쪽번호 글자 크기 8pt(sz 16) — 2026-10-12 사용자 확정 '쪽번호 양식을 아예 8로'
-            x = data.decode("utf-8")
-            x = re.sub(r"<w:p[ >].*?</w:p>", _page_no_8, x, flags=re.S)
-            data = x.encode("utf-8")
+            data = _page_no_8(data)
         zout.writestr(item, data)
     zout.close()
     with open(DST, "wb") as f:
@@ -60,11 +61,61 @@ def main():
     print("만듦:", DST)
 
 
-def _page_no_8(m):
-    p = m.group(0)
-    if "PAGE" not in p:
-        return p
-    return re.sub(r'(<w:szCs? w:val=")\d+(")', r"\g<1>16\2", p)
+def _clear_highlight(xml):
+    """회사 하이라이트 쪽(두 번째 문단의 첫 쪽나눔 뒤 그룹들)의 실제 딜 글을 지운다. 모양·그룹·제목은 그대로.
+    '<…>' 소제목 → '<하이라이트 제목>', 그 밖의 글 → '내용을 입력하세요'(문단마다 한 번). 'Overview'·'Deal Highlight' 는 둔다."""
+    from lxml import etree
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    root = etree.fromstring(xml)
+    body = root.find(W + "body")
+    paras = [el for el in body if el.tag == W + "p"]
+    if len(paras) < 2:
+        return xml
+    runs = [r for r in paras[1] if r.tag == W + "r"]
+    k = next((i for i, r in enumerate(runs)
+              if any(b.get(W + "type") == "page" for b in r.findall(W + "br"))), None)
+    if k is None:
+        return xml
+    keep = {"Overview", "Deal Highlight"}
+    for r in runs[k + 1:]:
+        for p in r.iter(W + "p"):
+            ts = list(p.iter(W + "t"))
+            txt = "".join(t.text or "" for t in ts).strip()
+            if not txt or txt in keep:
+                continue
+            new = "<하이라이트 제목>" if txt.startswith("<") and txt.endswith(">") else "내용을 입력하세요"
+            ts[0].text = new
+            for t in ts[1:]:
+                t.text = ""
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _page_no_8(xml):
+    """꼬리말에서 PAGE 필드가 든 문단의 글자 크기를 전부 8pt 로. (글상자 안 문단이 섞여 있어 정규식 말고 XML 로 읽는다)"""
+    from lxml import etree
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    root = etree.fromstring(xml)
+    for it in root.iter(W + "instrText"):
+        if "PAGE" not in (it.text or ""):
+            continue
+        p = next(a for a in it.iterancestors() if a.tag == W + "p")
+        for r in p.iter(W + "r"):
+            rpr = r.find(W + "rPr")
+            if rpr is None:
+                rpr = etree.Element(W + "rPr")
+                r.insert(0, rpr)
+            for tag in ("sz", "szCs"):
+                e = rpr.find(W + tag)
+                if e is None:
+                    e = etree.SubElement(rpr, W + tag)
+                e.set(W + "val", "16")
+        rpr = p.find(f"{W}pPr/{W}rPr")
+        if rpr is not None:
+            for tag in ("sz", "szCs"):
+                e = rpr.find(W + tag)
+                if e is not None:
+                    e.set(W + "val", "16")
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
 def _clear_values(m):

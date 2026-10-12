@@ -2,7 +2,7 @@
 """IM 회사양식 — 원본 IM(PDF)을 내용 그대로 두고 회사 양식만 입혀 워드로.
 
 바꾸는 것   : 표지 · 위 머리말 · 아래 회사 로고 · 글꼴(Pretendard) · 표 머리글 색(회사 네이비) · 맨 끝 연락처 쪽
-더하는 것   : Ⅰ. 사모사채 개요 (원본 하이라이트 뒤)
+더하는 것   : 회사 Investment Highlight 쪽(원본 하이라이트 대신) → Ⅰ. 사모사채 개요
 안 바꾸는 것: 내용 · 원본 1쪽 = 결과 1쪽
 규격        : 회사 양식(A4·여백·머리말/꼬리말) 고정. 원본 쪽이 크면 비율 그대로 줄여 넣는다.
 받는 것     : **PDF 만**(2026-10-08 사용자 확정 — 워드 원본은 결과가 엉망이라, 워드뿐이면 PDF 로 저장해 올리라고 안내)
@@ -166,7 +166,7 @@ if step == 1:
           <li>글꼴(Pretendard) · 표 머리글 색(회사 네이비)</li>
           <li>맨 끝 연락처 쪽</li>
         </ul>
-        <div style="margin-top:8px;"><b>더하는 것</b> : Ⅰ. 사모사채 개요 (원본 하이라이트 바로 뒤)</div>
+        <div style="margin-top:8px;"><b>더하는 것</b> : 회사 Investment Highlight 쪽(원본 하이라이트 대신) → Ⅰ. 사모사채 개요</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -281,7 +281,7 @@ elif step == 2:
         st.markdown("---")
         st.markdown("#### Ⅰ. 사모사채 개요")
         st.caption("왼쪽 구분은 항상 같고, 오른쪽 내용만 이번 딜에 맞게 적어 주세요. 비워 둔 칸은 빈칸으로 들어갑니다. "
-                   "원본 하이라이트(Executive Summary 등) 바로 뒤에 들어갑니다.")
+                   "회사 Investment Highlight 쪽 바로 다음 쪽에 들어갑니다.")
         for row in BOND_ROWS:
             k1, k2 = st.columns([1, 4])
             k1.markdown(f"<div style='padding-top:8px;font-weight:700;color:#08377C;'>{row}</div>",
@@ -354,12 +354,15 @@ elif step == 3:
                     "체크하면 그 쪽 내용이 통째로 빠집니다. (본문 쪽 안의 담당자 연락처는 체크하지 않아도 위처럼 "
                     "자동으로 지웁니다.)")
 
-        st.markdown("#### 하이라이트 쪽 (사모사채 개요가 이 뒤에 들어갑니다)")
+        st.markdown("#### 원본 하이라이트 쪽 (빼고 회사 Investment Highlight 쪽으로 바꿉니다)")
         found = info.get("highlight") or []
         st.caption(("원본에서 하이라이트로 보이는 쪽을 찾았습니다 : **" + ", ".join(f"{p}쪽" for p in found) + "**. "
-                    if found else "원본에서 하이라이트 쪽을 찾지 못했습니다(그러면 표지 바로 다음 쪽에 넣습니다). ")
-                   + "아래에서 쪽 그림을 보고 맞게 고르세요. 하이라이트 마지막 쪽에 여백이 넉넉하면 그 여백에 이어서, "
-                   "꽉 차 있으면 다음 쪽에 넣습니다.")
+                    if found else "원본에서 하이라이트 쪽을 찾지 못했습니다. ")
+                   + "여기서 고른 원본 쪽은 **결과에서 빠지고**, 그 자리에 회사 양식의 **Investment Highlight 쪽"
+                   "(Overview·Deal Highlight)** 이 표지 바로 다음에 들어갑니다. 그 쪽 내용은 양식 그대로 들어가니 "
+                   "워드에서 이번 딜에 맞게 고쳐 쓰세요. 그 다음 쪽에 Ⅰ. 사모사채 개요가 나옵니다. "
+                   "아래 쪽 그림을 보고 원본의 하이라이트(Executive Summary 등) 쪽을 고르세요. "
+                   "아무것도 안 고르면 원본 쪽은 하나도 빠지지 않습니다.")
         if "cf_thumbs" not in SS:
             SS["cf_thumbs"] = [pdf_input.page_png(SS["cf_bytes"], i, zoom=0.35) for i in range(1, min(n, 9))]
         tcols = st.columns(len(SS["cf_thumbs"]) or 1)
@@ -393,9 +396,10 @@ elif step == 3:
                 def _prog(v, msg):
                     bar.progress(min(max(v, 0.0), 1.0), text=f"만드는 중입니다… {msg}")
                 body, rep1 = pdf_input.convert(SS["cf_bytes"], drop_cover=SS.get("cf_drop_cover", True),
-                                               drop_last=SS.get("cf_drop_tail", False), progress=_prog)
-                _prog(0.98, "표지·사모사채 개요·연락처 넣는 중…")
-                place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])
+                                               drop_last=SS.get("cf_drop_tail", False), progress=_prog,
+                                               drop_pages=SS.get("cf_highlight") or [])
+                _prog(0.98, "표지·하이라이트·사모사채 개요·연락처 넣는 중…")
+                place = None                                     # 개요는 회사 하이라이트 쪽 바로 다음(새 쪽)
                 out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
                                          header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
                                          photo=photo, bond=bond, bond_place=place)
@@ -424,7 +428,10 @@ elif step == 3:
                     + (f" (회사 양식보다 커서 {min(p['비율'] for p in small) * 100:.0f}~"
                        f"{max(p['비율'] for p in small) * 100:.0f}% 로 줄인 쪽 {len(small)}개)." if small else "."),
                     f"표 머리글 칸 {rep.get('머리글 칸', 0)}개를 회사 네이비로 바꿨습니다.",
-                    f"사모사채 개요 : {rep.get('개요 자리', '')}."]
+                    "표지 다음에 회사 Investment Highlight 쪽, 그 다음 쪽에 Ⅰ. 사모사채 개요를 넣었습니다. "
+                    "**하이라이트 쪽 내용은 양식 그대로이니 워드에서 이번 딜에 맞게 고쳐 주세요.**"]
+            if rep.get("원본 하이라이트 뺀 쪽"):
+                done.append("원본 하이라이트 쪽을 뺐습니다 : " + ", ".join(f"{p}쪽" for p in rep["원본 하이라이트 뺀 쪽"]) + ".")
             if rep.get("원본 표지 뺌"):
                 done.append("원본 표지를 빼고 회사 표지를 넣었습니다.")
             if rep.get("원본 끝쪽 뺌"):

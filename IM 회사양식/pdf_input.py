@@ -602,7 +602,7 @@ def _fast_group(self, fun, _orig):
     return [self.__class__([items[i] for i in g]) for g in graph_bfs(index_groups)]
 
 
-def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None):
+def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_pages=None):
     """PDF bytes → (docx bytes, 보고 dict).
 
     보고['쪽'] = 결과 구역 순서대로 원본 쪽 번호(1부터)·줄인 비율·쓰인 높이(pt)·그림으로 넣었는지.
@@ -621,6 +621,12 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None):
         keep.remove(n - 1)
     if drop_cover and n > 1:
         keep.remove(0)
+    # 원본 하이라이트 쪽은 회사 Investment Highlight 쪽으로 바뀐다 → 뺀다(2026-10-12 사용자 확정). 1부터 센 쪽 번호.
+    rep["원본 하이라이트 뺀 쪽"] = []
+    for pg in sorted(set(drop_pages or [])):
+        if 0 <= pg - 1 < n and (pg - 1) in keep and len(keep) > 1:
+            keep.remove(pg - 1)
+            rep["원본 하이라이트 뺀 쪽"].append(pg)
     rep["원본 끝쪽 뺌"], rep["원본 표지 뺌"] = bool(drop_last and n > 2), bool(drop_cover and n > 1)
     rep["그림 글씨 고침"] = fix_image_text(doc)
     leftover = []

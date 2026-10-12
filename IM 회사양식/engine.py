@@ -284,6 +284,30 @@ def _is_frame(tbl):
     return wide and bool(f) and _lum(f) < 0.5
 
 
+def center_cells_vertically(doc):
+    """모든 표 칸의 글을 세로 가운데로(가로는 원본 그대로). 2026-10-12 사용자 확정 '표 글은 무조건 셀 가운데'.
+    pdf2docx 는 칸 안 위치를 문단 '앞 간격' 으로 맞춰 두므로, 그 간격(첫 문단 앞)을 없애야 진짜 가운데가 된다."""
+    n = 0
+    for tc in doc.element.body.iter(qn("w:tc")):
+        tcpr = tc.find(qn("w:tcPr"))
+        if tcpr is None:
+            tcpr = tc.makeelement(qn("w:tcPr"), {})
+            tc.insert(0, tcpr)
+        va = tcpr.find(qn("w:vAlign"))
+        if va is None:
+            va = tcpr.makeelement(qn("w:vAlign"), {})
+            hm = tcpr.find(qn("w:hideMark"))
+            hm.addprevious(va) if hm is not None else tcpr.append(va)   # vAlign 은 tcPr 끝(hideMark 앞)
+        va.set(qn("w:val"), "center")
+        first = next((ch for ch in tc if ch.tag in (qn("w:p"), qn("w:tbl"))), None)
+        if first is not None and first.tag == qn("w:p"):
+            sp = first.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+            if sp is not None:
+                sp.set(qn("w:before"), "0")
+        n += 1
+    return n
+
+
 def paint_headers(doc):
     """머리글 칸을 회사 네이비로. 고친 칸 수를 돌려준다.
 
@@ -641,10 +665,93 @@ def _set_par_text(p, text):
         t.text = ""
 
 
+def _is_page_break_run(r):
+    return r.tag == qn("w:r") and any(b.get(qn("w:type")) == "page" for b in r.findall(qn("w:br")))
+
+
+def _split_cover_para(p):
+    """양식 두 번째 문단 = [표지 글상자들][쪽나눔][회사 하이라이트 쪽 그룹들][쪽나눔] (2026-10-12 '(최종)' 양식).
+    → (표지 문단, 하이라이트 문단 또는 None) 사본. 하이라이트 문단은 끝의 쪽나눔을 그대로 둬 다음(사모사채 개요)이 새 쪽."""
+    cover, hl = copy.deepcopy(p), copy.deepcopy(p)
+    runs_c = [c for c in cover if c.tag == qn("w:r")]
+    k = next((i for i, r in enumerate(runs_c) if _is_page_break_run(r)), None)
+    if k is None:
+        return cover, None
+    for r in runs_c[k:]:
+        cover.remove(r)                                   # 표지: 첫 쪽나눔부터 뒤는 뺀다
+    runs_h = [c for c in hl if c.tag == qn("w:r")]
+    for r in runs_h[:k + 1]:
+        hl.remove(r)                                      # 하이라이트: 표지 글상자·첫 쪽나눔까지 뺀다
+    if not any(r.find(".//" + qn("w:drawing")) is not None or "".join(r.itertext()).strip()
+               for r in hl.findall(qn("w:r"))):
+        return cover, None
+    return cover, hl
+
+
+def _highlight_elements(tpl, doc):
+    """회사 Investment Highlight 쪽(양식 그대로, 그룹째) — 내용은 사용자가 워드에서 고친다(2026-10-12 확정)."""
+    tb = _blocks(tpl.element.body)
+    hl = _split_cover_para(tb[1])[1]
+    if hl is None:
+        return []
+    tpl_rels = tpl.part.rels
+    for node in hl.iter():
+        for attr in (R_EMBED, R_ID):
+            rid = node.get(attr)
+            if rid and rid in tpl_rels and tpl_rels[rid].reltype == RT.IMAGE:
+                new_rid, _ = doc.part.get_or_add_image(io.BytesIO(tpl_rels[rid].target_part.blob))
+                node.set(attr, new_rid)
+    _import_styles(tpl, doc, hl)
+    _import_numbering(tpl, doc, hl)
+    _pin_template_defaults(doc, hl)
+    return [hl]
+
+
+def _import_numbering(tpl, doc, root):
+    """root 가 쓰는 글머리/번호(numId)를 양식의 정의째 이 문서로 옮기고 번호를 새로 매긴다.
+    ★안 옮기면 이 문서의 같은 번호 정의를 써서 양식의 '→' 가 '1. 2. 3.' 으로 나왔다(하이라이트 쪽, 2026-10-12)."""
+    used = {n.get(qn("w:val")) for n in root.iter(qn("w:numId")) if n.get(qn("w:val")) not in (None, "0")}
+    if not used:
+        return
+    try:
+        tnum = tpl.part.numbering_part.element
+    except Exception:
+        return
+    dnum = doc.part.numbering_part.element
+    abs_ids = [int(a.get(qn("w:abstractNumId"))) for a in dnum.findall(qn("w:abstractNum"))] or [0]
+    num_ids = [int(a.get(qn("w:numId"))) for a in dnum.findall(qn("w:num"))] or [0]
+    next_abs, next_num = max(abs_ids) + 1, max(num_ids) + 1
+    remap = {}
+    for nid in used:
+        num = next((n for n in tnum.findall(qn("w:num")) if n.get(qn("w:numId")) == nid), None)
+        if num is None:
+            continue
+        aid = num.find(qn("w:abstractNumId")).get(qn("w:val"))
+        absn = next((a for a in tnum.findall(qn("w:abstractNum")) if a.get(qn("w:abstractNumId")) == aid), None)
+        if absn is None:
+            continue
+        new_abs = copy.deepcopy(absn)
+        new_abs.set(qn("w:abstractNumId"), str(next_abs))
+        for nsid in new_abs.findall(qn("w:nsid")):
+            new_abs.remove(nsid)                              # 같은 nsid 면 워드가 기존 목록과 합친다
+        first_num = dnum.find(qn("w:num"))
+        (first_num.addprevious(new_abs) if first_num is not None else dnum.append(new_abs))  # abstractNum 은 num 보다 앞
+        new_num = copy.deepcopy(num)
+        new_num.set(qn("w:numId"), str(next_num))
+        new_num.find(qn("w:abstractNumId")).set(qn("w:val"), str(next_abs))
+        dnum.append(new_num)
+        remap[nid] = str(next_num)
+        next_abs += 1
+        next_num += 1
+    for n in root.iter(qn("w:numId")):
+        if n.get(qn("w:val")) in remap:
+            n.set(qn("w:val"), remap[n.get(qn("w:val"))])
+
+
 def _cover_elements(tpl, doc, title_lines, date_text, photo):
     """양식 표지(문단 0·1)를 복사해 글·사진을 바꿔 돌려준다."""
     tb = _blocks(tpl.element.body)
-    els = [copy.deepcopy(tb[0]), copy.deepcopy(tb[1])]
+    els = [copy.deepcopy(tb[0]), _split_cover_para(tb[1])[0]]
     lines = (list(title_lines) + ["", ""])[:2]
     for el in els:
         for tx in el.iter(qn("w:txbxContent")):
@@ -937,7 +1044,7 @@ def _copy_hdrftr(tpl, doc, src_part, dst_hf, header_text=None):
             if "".join(p.itertext()).strip():
                 _set_par_text(p, header_text)
                 break
-    _page_no_size(dst)
+    # 쪽번호 8pt 는 양식 파일 자체에 넣었다(양식\_틀만들기.py) — 여기서 따로 안 바꾼다
 
 
 PAGE_NO_SZ = 16              # 쪽번호 글자 크기 8pt(반 pt 단위) — 2026-10-12 사용자 확정(양식은 11pt 라 너무 컸다)
@@ -1096,6 +1203,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
 
     apply_fonts(doc)
     rep["머리글 칸"] = paint_headers(doc)
+    rep["세로 가운데 칸"] = center_cells_vertically(doc)
 
     body = doc.element.body
     # 원본 구역들: 쪽번호를 처음부터 다시 세는 설정 지우기(표지부터 이어 세게)
@@ -1137,7 +1245,10 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     for br in list(cover[-1].iter(qn("w:br"))):
         if br.get(qn("w:type")) == "page":
             br.getparent().remove(br)
-    for i, el in enumerate(cover + [_holder(_sect_from_template(tpl, title_page=True))]):
+    # 회사 Investment Highlight 쪽(양식 그대로) — 표지 바로 다음, 그 뒤에 사모사채 개요(새 쪽)
+    hl = _highlight_elements(tpl, doc)
+    rep["회사 하이라이트 쪽"] = bool(hl)
+    for i, el in enumerate(cover + [_holder(_sect_from_template(tpl, title_page=True))] + hl):
         body.insert(i, el)
 
     # ── 머리말·꼬리말: 첫 구역에만 넣고 나머지는 '앞과 같게' ──
