@@ -48,11 +48,23 @@ def main():
                                                ("사업명 사모사채 제안서" if "제안서" in m.group(2) else m.group(2)))
                        + m.group(3), x)
             data = x.encode("utf-8")
+        elif re.match(r"word/footer\d+\.xml$", item.filename):
+            # 쪽번호 글자 크기 8pt(sz 16) — 2026-10-12 사용자 확정 '쪽번호 양식을 아예 8로'
+            x = data.decode("utf-8")
+            x = re.sub(r"<w:p[ >].*?</w:p>", _page_no_8, x, flags=re.S)
+            data = x.encode("utf-8")
         zout.writestr(item, data)
     zout.close()
     with open(DST, "wb") as f:
         f.write(out.getvalue())
     print("만듦:", DST)
+
+
+def _page_no_8(m):
+    p = m.group(0)
+    if "PAGE" not in p:
+        return p
+    return re.sub(r'(<w:szCs? w:val=")\d+(")', r"\g<1>16\2", p)
 
 
 def _clear_values(m):

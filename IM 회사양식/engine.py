@@ -937,10 +937,29 @@ def _copy_hdrftr(tpl, doc, src_part, dst_hf, header_text=None):
             if "".join(p.itertext()).strip():
                 _set_par_text(p, header_text)
                 break
-    for rpr in dst.iter(qn("w:rPr")):
-        rf = rpr.find(qn("w:rFonts"))
-        if rf is not None and not _is_symbol(rf):
-            pass
+    _page_no_size(dst)
+
+
+PAGE_NO_SZ = 16              # 쪽번호 글자 크기 8pt(반 pt 단위) — 2026-10-12 사용자 확정(양식은 11pt 라 너무 컸다)
+
+
+def _page_no_size(root):
+    """PAGE 필드(쪽번호)가 든 문단의 글자 크기를 PAGE_NO_SZ 로."""
+    for p in root.iter(qn("w:p")):
+        if not any("PAGE" in (t.text or "") for t in p.iter(qn("w:instrText"))) and \
+                not any("PAGE" in (f.get(qn("w:instr")) or "") for f in p.iter(qn("w:fldSimple"))):
+            continue
+        for r in p.iter(qn("w:r")):
+            rpr = r.find(qn("w:rPr"))
+            if rpr is None:
+                rpr = r.makeelement(qn("w:rPr"), {})
+                r.insert(0, rpr)
+            for tag in ("w:sz", "w:szCs"):
+                e = rpr.find(qn(tag))
+                if e is None:
+                    e = rpr.makeelement(qn(tag), {})
+                    rpr.append(e)
+                e.set(qn("w:val"), str(PAGE_NO_SZ))
 
 
 def _renumber_shapes(doc):
