@@ -56,13 +56,38 @@ def last_page_is_contact(doc):
     return len(set(EMAIL_RE.findall(t))) + len(set(PHONE_RE.findall(t))) >= 2
 
 
+SECTION_HEAD_RE = re.compile(r"^\s*(\d{1,2}\s*\.|[Ⅰ-Ⅻ]\s*\.?|[IVX]{1,4}\s*\.)\s*\S")
+
+
+def highlight_band(page):
+    """쪽 위쪽에 하이라이트 제목이 있고 그 아래에 다른 대단원 제목(예: '1. 주요금융조건')이 이어지면
+    → 하이라이트 부분의 (위 y, 아래 y). 하이라이트만 있는 쪽이거나 하이라이트가 없으면 None.
+    ★등촌역 3쪽: 위 1/4 이 Executive Summary, 나머지가 '1. 주요금융조건' 표 — 쪽째 빼면 금융조건이 사라진다(2026-10-13)."""
+    h = page.rect.height
+    lines = []
+    for b in page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            t = "".join(s["text"] for s in l["spans"]).strip()
+            if t:
+                lines.append((l["bbox"][1], max(s["size"] for s in l["spans"]), t))
+    lines.sort()
+    title = next(((y, sz) for y, sz, t in lines if y < h * 0.35 and HIGHLIGHT_RE.search(t) and len(t) < 40), None)
+    if title is None:
+        return None
+    ty, tsz = title
+    nxt = next((y for y, sz, t in lines if y > ty + 5 and y < h * 0.85 and sz >= tsz - 1 and len(t) < 40
+                and SECTION_HEAD_RE.match(t) and not HIGHLIGHT_RE.search(t)), None)
+    return (ty, nxt) if nxt is not None else None
+
+
 def find_highlight_pages(pdf_bytes):
-    """하이라이트(Executive Summary 등) 쪽 번호(1부터) 목록. 표지 다음 6쪽 안에서, 쪽 위쪽 글로 찾는다."""
+    """하이라이트(Executive Summary 등) 쪽 번호(1부터) 목록. 표지 다음 6쪽 안에서, 쪽 위쪽 글로 찾는다.
+    하이라이트와 본문이 한 쪽에 섞인 쪽은 넣지 않는다(그 쪽은 convert 가 하이라이트 부분만 지운다)."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     hits = []
     for i in range(1, min(doc.page_count, 7)):
         top = doc[i].get_text("text", clip=fitz.Rect(0, 0, doc[i].rect.width, doc[i].rect.height * 0.35))
-        if HIGHLIGHT_RE.search(top):
+        if HIGHLIGHT_RE.search(top) and highlight_band(doc[i]) is None:
             hits.append(i + 1)
         elif hits:
             break
@@ -629,6 +654,17 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
             rep["원본 하이라이트 뺀 쪽"].append(pg)
     rep["원본 끝쪽 뺌"], rep["원본 표지 뺌"] = bool(drop_last and n > 2), bool(drop_cover and n > 1)
     rep["그림 글씨 고침"] = fix_image_text(doc)
+    # 하이라이트와 본문이 섞인 쪽(표지 다음 6쪽 안) → 하이라이트 부분만 지운다(회사 하이라이트 쪽으로 대체)
+    rep["원본 하이라이트 일부 지운 쪽"] = []
+    for i in [k for k in keep if 1 <= k <= 6]:
+        band = highlight_band(doc[i])
+        if band is None:
+            continue
+        y0, y1 = band
+        page = doc[i]
+        page.add_redact_annot(fitz.Rect(0, y0 - 4, page.rect.width, y1 - 4), fill=False)
+        _apply(page, images=True, graphics="covered", text=True)
+        rep["원본 하이라이트 일부 지운 쪽"].append(i + 1)
     leftover = []
     rep["머리말·꼬리말 지운 쪽"] = strip_repeating_bands(doc, leftover)
     # 원본 담당자 연락처(어느 쪽이든)·머리말 띠의 로고(한 쪽에만 있어도) — 2026-10-08 사용자 확정
@@ -1165,9 +1201,85 @@ def fill_white_text_cells(d):
             after.addprevious(shd) if after is not None else tcpr.append(shd)
         shd.set(qn("w:val"), "clear")
         shd.set(qn("w:color"), "auto")
-        shd.set(qn("w:fill"), "243F60")
+        shd.set(qn("w:fill"), _table_dark_fill(tc) or "243F60")
         n += 1
+    _fill_vmerge_continues(d)
+    _fill_gaps_in_header_rows(d)
     return n
+
+
+def _fill_gaps_in_header_rows(d):
+    """머리글 줄에서 양옆이 같은 진한 색인데 혼자 비어 흰 칸 → 같은 색(이천 대월 '계약금' 아래 칸)."""
+    import copy
+    from docx.oxml.ns import qn
+
+    def fill_of(tc):
+        shd = tc.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+        f = (shd.get(qn("w:fill")) or "").upper() if shd is not None else ""
+        return f if f and f != "AUTO" and _lum_hex(f) < 0.5 else None
+    for tr in d.element.body.iter(qn("w:tr")):
+        tcs = tr.findall(qn("w:tc"))
+        for i in range(1, len(tcs) - 1):
+            tc = tcs[i]
+            if "".join(t.text or "" for t in tc.iter(qn("w:t"))).strip() or tc.find(f"{qn('w:tcPr')}/{qn('w:shd')}") is not None:
+                continue
+            a, b = fill_of(tcs[i - 1]), fill_of(tcs[i + 1])
+            if a and a == b:
+                pr = tc.find(qn("w:tcPr"))
+                sh = copy.deepcopy(tcs[i - 1].find(f"{qn('w:tcPr')}/{qn('w:shd')}"))
+                after = next((pr.find(qn(t)) for t in ("w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
+                                                        "w:vAlign", "w:hideMark") if pr.find(qn(t)) is not None), None)
+                after.addprevious(sh) if after is not None else pr.append(sh)
+
+
+def _lum_hex(h):
+    try:
+        r, g, b = (int(h[i:i + 2], 16) / 255 for i in (0, 2, 4))
+        return 0.299 * r + 0.587 * g + 0.114 * b
+    except Exception:
+        return 1.0
+
+
+def _table_dark_fill(tc):
+    """칸이 든 표에서 가장 많이 쓴 진한 바탕색 — 빠진 머리글 색을 원본 색으로 채우려고(이천 대월: 검정)."""
+    from collections import Counter
+    from docx.oxml.ns import qn
+    tbl = next((a for a in tc.iterancestors() if a.tag == qn("w:tbl")), None)
+    if tbl is None:
+        return None
+    cnt = Counter()
+    for c in tbl.iter(qn("w:tc")):
+        if next((a for a in c.iterancestors() if a.tag == qn("w:tbl")), None) is not tbl:
+            continue
+        shd = c.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+        f = (shd.get(qn("w:fill")) or "").upper() if shd is not None else ""
+        if f and f not in ("AUTO",) and _lum_hex(f) < 0.5:
+            cnt[f] += 1
+    return cnt.most_common(1)[0][0] if cnt else None
+
+
+def _fill_vmerge_continues(d):
+    """세로로 합친 칸의 아래 칸(이어짐)에 바탕색이 없으면 맨 위 칸 색을 그대로(합친 칸 한쪽만 흰색이 되던 것)."""
+    import copy
+    from docx.oxml.ns import qn
+    for tbl in d.element.body.iter(qn("w:tbl")):
+        above = {}                                         # 눈금 시작 → 위 줄 칸
+        for tr in tbl.findall(qn("w:tr")):
+            pos, row = 0, {}
+            for tc in tr.findall(qn("w:tc")):
+                pr = tc.find(qn("w:tcPr"))
+                gs = pr.find(qn("w:gridSpan")) if pr is not None else None
+                vm = pr.find(qn("w:vMerge")) if pr is not None else None
+                if vm is not None and vm.get(qn("w:val")) in (None, "continue") and pos in above:
+                    src = above[pos].find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+                    if src is not None and pr.find(qn("w:shd")) is None:
+                        sh = copy.deepcopy(src)
+                        after = next((pr.find(qn(t)) for t in ("w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
+                                                                "w:vAlign", "w:hideMark") if pr.find(qn(t)) is not None), None)
+                        after.addprevious(sh) if after is not None else pr.append(sh)
+                row[pos] = tc
+                pos += int(gs.get(qn("w:val"))) if gs is not None else 1
+            above = row
 
 
 def _row_cells(tbl):

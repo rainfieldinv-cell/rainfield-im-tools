@@ -287,6 +287,20 @@ def _is_frame(tbl):
 _SEC_NO_RE = re.compile(r"\s*(\d{1,2}|[IVX]{1,4}|[Ⅰ-Ⅻ])\.?\s*")
 
 
+def _heading_row(tbl):
+    """대단원 띠 표의 '진짜 줄' 하나(나머지가 글 없는 얇은 줄 = 밑줄용이면 그것들도 함께 돌려준다). 아니면 (None, [])."""
+    rows = tbl.findall(qn("w:tr"))
+    real, thin = [], []
+    for tr in rows:
+        h = tr.find(f"{qn('w:trPr')}/{qn('w:trHeight')}")
+        hv = int(float(h.get(qn("w:val")))) if h is not None and re.fullmatch(r"[\d.]+", h.get(qn("w:val")) or "") else 999
+        if not "".join(t.text or "" for t in tr.iter(qn("w:t"))).strip() and hv < 120:
+            thin.append(tr)                                  # 고산3지구: 제목 줄 아래 1.7pt 짜리 밑줄 줄
+        else:
+            real.append(tr)
+    return (real[0], thin) if len(real) == 1 else (None, [])
+
+
 def restyle_section_headings(doc):
     """원본 대단원 제목 띠 [색 칠한 번호 칸][제목 + 밑줄] → 회사 모양: 번호 칸 네이비 + 흰 번호, 밑줄은 뺀다.
     번호·제목 글은 그대로(2026-10-12 사용자 확정, 그림판 그림: 노란 '3' 상자+노란 밑줄 → 네이비 '3' 상자).
@@ -296,10 +310,10 @@ def restyle_section_headings(doc):
     for tbl in list(body.iter(qn("w:tbl"))):
         if any(a.tag == qn("w:tbl") for a in tbl.iterancestors()):
             continue
-        rows = tbl.findall(qn("w:tr"))
-        if len(rows) != 1:
+        row, thin = _heading_row(tbl)
+        if row is None:
             continue
-        cells = rows[0].findall(qn("w:tc"))
+        cells = row.findall(qn("w:tc"))
         if len(cells) != 2:
             continue
         num_txt = "".join(t.text or "" for t in cells[0].iter(qn("w:t")))
@@ -309,24 +323,226 @@ def restyle_section_headings(doc):
         fills = [_fill(tc) for tc in cells[0].iter(qn("w:tc"))]
         if not any(fills):
             continue
-        for tc in cells[0].iter(qn("w:tc")):                 # 번호 칸(안쪽 표 칸까지) 네이비 + 테두리 네이비
-            _paint_navy(tc)
-            b = tc.find(f"{qn('w:tcPr')}/{qn('w:tcBorders')}")
-            if b is not None:
-                for e in b:
-                    if e.get(qn("w:val")) not in (None, "nil", "none"):
-                        e.set(qn("w:color"), NAVY)
-        for r in cells[0].iter(qn("w:r")):
-            rpr = r.find(qn("w:rPr"))
-            if rpr is not None:
-                col = rpr.find(qn("w:color"))
-                if col is not None:
-                    col.set(qn("w:val"), "FFFFFF")
+        # 번호 칸: 안쪽 작은 표(pdf2docx 가 만든 것)를 걷어내고 번호 하나만 가로·세로 가운데로(2026-10-13 사용자 확정)
+        c0 = cells[0]
+        run0 = next((r for r in c0.iter(qn("w:r")) if "".join(t.text or "" for t in r.iter(qn("w:t"))).strip()), None)
+        rpr0 = copy.deepcopy(run0.find(qn("w:rPr"))) if run0 is not None and run0.find(qn("w:rPr")) is not None else None
+        for ch in list(c0):
+            if ch.tag != qn("w:tcPr"):
+                c0.remove(ch)
+        p = c0.makeelement(qn("w:p"), {})
+        ppr = etree.SubElement(p, qn("w:pPr"))
+        etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0"})
+        etree.SubElement(ppr, qn("w:ind"), {qn("w:left"): "0", qn("w:right"): "0", qn("w:firstLine"): "0"})
+        etree.SubElement(ppr, qn("w:jc"), {qn("w:val"): "center"})
+        r = etree.SubElement(p, qn("w:r"))
+        if rpr0 is not None:
+            for sp in rpr0.findall(qn("w:spacing")):
+                rpr0.remove(sp)
+            r.append(rpr0)
+        t = etree.SubElement(r, qn("w:t"))
+        t.text = num_txt.strip()
+        c0.append(p)
+        tcpr = c0.find(qn("w:tcPr"))
+        mar = tcpr.find(qn("w:tcMar"))
+        if mar is not None:
+            tcpr.remove(mar)
+        _paint_navy(c0)
+        _put(tcpr, tcpr.makeelement(qn("w:vAlign"), {qn("w:val"): "center"}))
+        b = tcpr.find(qn("w:tcBorders"))
+        if b is not None:
+            for e in b:
+                if e.get(qn("w:val")) not in (None, "nil", "none"):
+                    e.set(qn("w:color"), NAVY)
+        for tr in thin:                                       # 밑줄용 얇은 줄도 뺀다
+            tbl.remove(tr)
         b = cells[1].find(f"{qn('w:tcPr')}/{qn('w:tcBorders')}")   # 제목 칸 밑줄·옆줄 빼기
         if b is not None:
             for e in list(b):
                 b.remove(e)
         n += 1
+    return n
+
+
+_ROMAN = ["", "Ⅰ", "Ⅱ", "Ⅲ", "Ⅳ", "Ⅴ", "Ⅵ", "Ⅶ", "Ⅷ", "Ⅸ", "Ⅹ", "Ⅺ", "Ⅻ"]
+_ROMAN_ASCII = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"]
+_HEAD_PATTERNS = [                                          # (이름, 정규식: 1=앞 2=번호 3=뒤 4=제목)
+    ("roman", re.compile(r"^(\s*)([Ⅰ-Ⅻ]|(?:X{0,1}(?:IX|IV|V?I{0,3})))(\s*[.)]\s*|\s+)(\S.*)$")),
+    ("paren", re.compile(r"^(\s*\()(\d{1,2})(\)\s*)(\S.*)$")),
+    ("digit", re.compile(r"^(\s*)(\d{1,2})(\s*[.)]\s*)(\S.*)$")),
+]
+
+
+def _num_value(kind, tok):
+    if kind == "roman":
+        tok = tok.strip()
+        if tok in _ROMAN:
+            return _ROMAN.index(tok)
+        return _ROMAN_ASCII.index(tok) if tok in _ROMAN_ASCII else None
+    return int(tok)
+
+
+def _num_text(kind, tok, v):
+    if kind == "roman":
+        if v <= 0:
+            return None
+        return (_ROMAN if tok.strip() in _ROMAN else _ROMAN_ASCII)[v]
+    return str(v)
+
+
+def _bond_heading_from_original(doc):
+    """사모사채 개요 제목을 원본 대단원 제목 모양 그대로(2026-10-13 사용자 확정).
+    ① 원본에 [번호 상자][제목] 띠가 있으면 → 그 띠를 복사(이미 회사 네이비로 바뀐 것), 번호 = 원본 첫 대단원 번호 − 1
+       (원본이 1 부터면 0), 제목 '사모사채 개요'.
+    ② 없으면 → 원본 대단원 문단(Ⅰ.·1.·(1) 중 글자가 가장 큰 것)을 복사, 같은 번호 모양으로 번호 − 1.
+       로마숫자인데 0 이 되면 번호 없이 제목만.
+    못 찾으면 None(번호 없이 '사모사채 개요')."""
+    body = doc.element.body
+    for tbl in body.iter(qn("w:tbl")):
+        if any(a.tag == qn("w:tbl") for a in tbl.iterancestors()):
+            continue
+        row, _ = _heading_row(tbl)
+        if row is None or len(row.findall(qn("w:tc"))) != 2 or len(tbl.findall(qn("w:tr"))) != 1:
+            continue
+        c0, c1 = row.findall(qn("w:tc"))
+        num = "".join(t.text or "" for t in c0.iter(qn("w:t"))).strip().rstrip(".")
+        if not _SEC_NO_RE.fullmatch(num or "x") or not _fill(c0):
+            continue
+        kind = "digit" if num.isdigit() else "roman"
+        v = _num_value(kind, num)
+        if v is None:
+            continue
+        new = copy.deepcopy(tbl)
+        n0, n1 = new.findall(qn("w:tr"))[0].findall(qn("w:tc"))
+        txt = _num_text(kind, num, v - 1)
+        _set_cell_text(n0, txt if txt is not None else "")
+        _set_cell_text(n1, "사모사채 개요")
+        return new
+    for p in body.findall(qn("w:p")):                        # 방배동식: 번호 글자 바탕만 칠한 문단
+        hit = _shaded_number_runs(p)
+        if not hit:
+            continue
+        shaded, num, title_r = hit
+        num = num.rstrip(".")
+        kind = "digit" if num.isdigit() else "roman"
+        v = _num_value(kind, num)
+        if v is None:
+            continue
+        new = copy.deepcopy(p)
+        idx = list(p).index(title_r)
+        for ch in list(new)[idx + 1:]:                       # 제목 뒤(줄바꿈·다음 소제목)는 버린다
+            new.remove(ch)
+        nruns = [r for r in new.findall(qn("w:r")) if r.find(qn("w:t")) is not None]
+        txt = _num_text(kind, num, v - 1)
+        # 번호가 든 조각만 바꾸고, 번호 뒤 칠한 빈칸(상자 여백)은 원본 그대로 둔다
+        for r in nruns[:len(shaded)]:
+            for t in r.findall(qn("w:t")):
+                if (t.text or "").strip():
+                    t.text = ""
+        if nruns:
+            first_num = next((r for r in nruns[:len(shaded)]), None)
+            first_num.find(qn("w:t")).text = txt if txt is not None else ""
+            last = nruns[len(shaded)].find(qn("w:t")) if len(nruns) > len(shaded) else None
+            if last is not None:
+                lead = (last.text or "")[:len(last.text or "") - len((last.text or "").lstrip())]
+                last.text = lead + "사모사채 개요"
+                last.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        for sp in new.iter(qn("w:sectPr")):
+            sp.getparent().remove(sp)
+        return new
+    best = None                                              # (글자 크기, 종류, 문단, 매치)
+    found = {}
+    for p in body.findall(qn("w:p")):
+        txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if not txt.strip() or len(txt.strip()) > 40:
+            continue
+        for kind, rx in _HEAD_PATTERNS:
+            m = rx.match(txt)
+            if not m or not m.group(2):
+                continue
+            v = _num_value(kind, m.group(2))
+            if v is None or v <= 0:
+                continue
+            szs = [int(s.get(qn("w:val"))) for s in p.iter(qn("w:sz")) if (s.get(qn("w:val")) or "").isdigit()]
+            sz = max(szs) if szs else 20
+            found.setdefault(kind, []).append((sz, p, m, v))
+            break
+    cands = [(max(x[0] for x in lst), kind, lst) for kind, lst in found.items() if len(lst) >= 2]
+    if not cands:
+        return None
+    sz, kind, lst = max(cands, key=lambda c: c[0])
+    first = next(x for x in lst if x[0] >= sz - 1)           # 가장 큰 글자 무리의 첫 제목 = 원본 첫 대단원
+    _, p, m, v = first
+    new = copy.deepcopy(p)
+    numtxt = _num_text(kind, m.group(2), v - 1)
+    text = (m.group(1) + numtxt + m.group(3) + "사모사채 개요") if numtxt is not None else "사모사채 개요"
+    _set_par_text(new, text)
+    for sp in new.iter(qn("w:sectPr")):
+        sp.getparent().remove(sp)
+    return new
+
+
+def _shaded_number_runs(p):
+    """문단 맨 앞이 '칠한 바탕의 번호' 글 조각이면 (번호 조각들, 번호 글, 제목 조각) — 방배동식 대단원
+    [■3■][ 담보자산 개요]. 아니면 None."""
+    runs = [r for r in p.findall(qn("w:r")) if r.find(qn("w:t")) is not None]
+    shaded, num = [], ""
+    for r in runs:
+        shd = r.find(f"{qn('w:rPr')}/{qn('w:shd')}")
+        f = (shd.get(qn("w:fill")) or "").upper() if shd is not None else ""
+        txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
+        if f not in ("", "AUTO", "FFFFFF"):
+            shaded.append(r)
+            num += txt
+            continue
+        if shaded and txt.strip():
+            return (shaded, num.strip(), r) if _SEC_NO_RE.fullmatch(num.strip() or "x") else None
+        if txt.strip():
+            return None
+    return None
+
+
+def restyle_shaded_number_headings(doc):
+    """방배동식 대단원(번호 글자 바탕만 칠한 문단) → 번호 바탕 회사 네이비, 번호 흰 글씨. 고친 수."""
+    n = 0
+    for p in doc.element.body.findall(qn("w:p")):
+        hit = _shaded_number_runs(p)
+        if not hit:
+            continue
+        for r in hit[0]:
+            rpr = r.find(qn("w:rPr"))
+            for shd in rpr.findall(qn("w:shd")):
+                shd.set(qn("w:fill"), NAVY)
+            col = rpr.find(qn("w:color"))
+            if col is None:
+                col = rpr.makeelement(qn("w:color"), {})
+                _put(rpr, col)
+            col.set(qn("w:val"), "FFFFFF")
+        n += 1
+    return n
+
+
+def _set_cell_text(tc, text):
+    p = next(iter(tc.findall(qn("w:p"))), None)
+    if p is None:
+        p = etree.SubElement(tc, qn("w:p"))
+    for extra in tc.findall(qn("w:p"))[1:]:
+        tc.remove(extra)
+    if p.find(".//" + qn("w:t")) is None:
+        r = etree.SubElement(p, qn("w:r"))
+        etree.SubElement(r, qn("w:t"))
+    _set_par_text(p, text)
+
+
+def strip_cell_trailing_spaces(doc):
+    """표 칸 글 끝의 빈칸을 지운다 — 가운데 맞춤 칸에서 글이 한쪽으로 쏠려 보였다(이천 대월 '차    주 ')."""
+    n = 0
+    for tc in doc.element.body.iter(qn("w:tc")):
+        for p in tc.findall(qn("w:p")):
+            ts = [t for t in p.iter(qn("w:t")) if t.text]
+            if ts and ts[-1].text != ts[-1].text.rstrip():
+                ts[-1].text = ts[-1].text.rstrip()
+                n += 1
     return n
 
 
@@ -367,8 +583,8 @@ def paint_headers(doc):
     frames = [t for t in body.iter(qn("w:tbl")) if _is_frame(t)]
     frame_ids = set(map(id, frames))
     for tbl in body.iter(qn("w:tbl")):
-        if any(a in frames for a in tbl.iterancestors(qn("w:tbl"))):
-            continue                                          # 큰 틀 안의 표 — 원본 색 그대로
+        if any(True for _ in tbl.iterancestors(qn("w:tbl"))):
+            continue                                          # 표 안의 표는 전부 원본 색 그대로(2026-10-08 확정, 10-13 이천 대월에서 바로잡음)
         rows = tbl.findall(qn("w:tr"))
         if not rows:
             continue
@@ -1250,7 +1466,8 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     apply_fonts(doc)
     rep["머리글 칸"] = paint_headers(doc)
     rep["세로 가운데 칸"] = center_cells_vertically(doc)
-    rep["대단원 제목 회사 모양"] = restyle_section_headings(doc)
+    rep["대단원 제목 회사 모양"] = restyle_section_headings(doc) + restyle_shaded_number_headings(doc)
+    rep["칸 끝 빈칸 지움"] = strip_cell_trailing_spaces(doc)
 
     body = doc.element.body
     # 원본 구역들: 쪽번호를 처음부터 다시 세는 설정 지우기(표지부터 이어 세게)
@@ -1260,9 +1477,28 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
             pn.attrib.pop(qn("w:start"), None)
 
     # ── 사모사채 개요: 하이라이트 뒤 ──
+    head = _bond_heading_from_original(doc)
     bond_els = _build_bond_section(doc, bond)
     for el in bond_els:
         body.remove(el)
+    # 제목은 원본 대단원 모양 그대로(2026-10-13) — 'Ⅰ.' 같은 번호를 도구가 정하지 않는다
+    if head is not None:
+        if head.tag == qn("w:p"):
+            sp = head.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+            if sp is not None:
+                sp.set(qn("w:before"), "0")
+            bond_els[0] = head
+            rep["개요 제목"] = "원본 대단원 문단 모양: " + "".join(t.text or "" for t in head.iter(qn("w:t")))
+        else:
+            gap = etree.Element(qn("w:p"))                  # 표 두 개가 붙으면 워드가 한 표로 합친다 → 사이에 빈 문단
+            gp = etree.SubElement(gap, qn("w:pPr"))
+            etree.SubElement(gp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "200",
+                                                    qn("w:lineRule"): "exact"})
+            bond_els[0:1] = [head, gap]
+            rep["개요 제목"] = "원본 번호 상자 모양: " + "".join(t.text or "" for t in head.iter(qn("w:t")))
+    else:
+        _set_par_text(bond_els[0], "사모사채 개요")
+        rep["개요 제목"] = "원본 대단원 모양을 못 찾아 번호 없이"
     if bond_place is not None and bond_place[1]:
         h = bond_els[0]                                     # 같은 쪽에 이을 때는 위와 조금 띄운다
         ppr = _first_child(h, "pPr")
