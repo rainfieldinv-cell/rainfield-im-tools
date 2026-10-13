@@ -756,6 +756,13 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     ignored = {conv[p - 1] for p in catcher.pages if 0 < p <= len(conv)} | heavy
 
     d = docx.Document(io.BytesIO(raw))
+    # 망가진 '표 안의 표' 는 다른 손질 전에 원본 그림으로(손질 뒤엔 채운 칸이 늘어 멀쩡한 표까지 걸린다)
+    _orig = fitz.open(stream=pdf_bytes, filetype="pdf")
+    _done0 = [k for k in keep if k not in ignored]
+    rep["망가진 안쪽 표 그림으로"] = []
+    for (_secs, _grps), k in zip(_pages(d), _done0):
+        if fix_broken_nested_tables(d, _grps, _orig[k]):
+            rep["망가진 안쪽 표 그림으로"].append(k + 1)
     rep["워드에서 지운 머리말 줄"] = drop_paragraphs(d, set(leftover))
     # fix_wrap_tabs(줄바꿈 탭→띄어쓰기)는 안 쓴다 — 목차·글머리 줄을 이어 붙여 원본을 망가뜨렸다(내곡동, 2026-10-12).
     # 대신 글자 폭을 원본과 같게 맞춰(match_char_width) 탭·줄바꿈이 원본 자리에 그대로 떨어지게 한다.
@@ -1280,6 +1287,86 @@ def _fill_vmerge_continues(d):
                 row[pos] = tc
                 pos += int(gs.get(qn("w:val"))) if gs is not None else 1
             above = row
+
+
+def _is_wrapper_tbl(t):
+    from docx.oxml.ns import qn
+    rows = t.findall(qn("w:tr"))
+    tcs = rows[0].findall(qn("w:tc")) if len(rows) == 1 else []
+    return len(tcs) == 1 and tcs[0].find(qn("w:tbl")) is not None
+
+
+def fix_broken_nested_tables(d, grps, page):
+    """pdf2docx 가 망가뜨린 '표 안의 표' 를 원본 그 부분 그림으로 바꾼다. 바꾼 수.
+    망가진 표 = 글이 든 안쪽 표인데 글 없는 진한 칸이 5개 이상(원본 머리글 칠이 엉뚱한 빈 칸들에 흩어짐).
+    ★방배동 2쪽 '금융조건'(표 안의 표 안의 표): 검은/남색 덩어리로 뒤죽박죽 — 어제 판도 같았다(2026-10-13).
+    그 표를 품은 맨 바깥 칸의 내용을 통째로, 원본에서 그 칸 글들이 있는 자리를 잘라 낸 그림으로 바꾼다."""
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+    n = 0
+    for el in grps_iter(grps):
+        for t in list(el.iter(qn("w:tbl"))):
+            if t.getparent() is None or not any(a.tag == qn("w:tbl") and not _is_wrapper_tbl(a) for a in t.iterancestors()):
+                continue
+            tcs = [c for c in t.iter(qn("w:tc")) if next((a for a in c.iterancestors() if a.tag == qn("w:tbl")), None) is t]
+            dark_empty = 0
+            for c in tcs:
+                shd = c.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+                f = (shd.get(qn("w:fill")) or "") if shd is not None else ""
+                if f and _lum_hex(f) < 0.5 and not "".join(x.text or "" for x in c.iter(qn("w:t"))).strip():
+                    dark_empty += 1
+            if dark_empty < 5 or not "".join(x.text or "" for x in t.iter(qn("w:t"))).strip():
+                continue
+            # 맨 바깥(껍데기 아닌) 표의 칸 = 바꿀 자리
+            cells = [a for a in t.iterancestors() if a.tag == qn("w:tc")]
+            outer = None
+            for c in cells:
+                tb = next((a for a in c.iterancestors() if a.tag == qn("w:tbl")), None)
+                if tb is not None and not any(x.tag == qn("w:tbl") and not _is_wrapper_tbl(x) for x in tb.iterancestors()):
+                    outer = c
+            if outer is None:
+                continue
+            words = {x.strip() for x in ("".join(r.text or "" for r in p.iter(qn("w:t"))) for p in outer.iter(qn("w:p")))
+                     if len(x.strip()) >= 2}
+            box = fitz.Rect()
+            for w in words:
+                for r in page.search_for(w)[:1]:
+                    box |= r
+            if box.is_empty or box.width < 30:
+                continue
+            box = (box + (-6, -6, 6, 6)) & page.rect
+            png = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=box).tobytes("png")
+            w_el = outer.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            cell_w = int(float(w_el.get(qn("w:w")))) / 20 if w_el is not None and re.fullmatch(r"[\d.]+", w_el.get(qn("w:w")) or "") else box.width
+            wpt = min(box.width, cell_w - 4)
+            inline = d.part.new_pic_inline(io.BytesIO(png), Pt(wpt), Pt(wpt * box.height / box.width))
+            for ch in list(outer):
+                if ch.tag != qn("w:tcPr"):
+                    outer.remove(ch)
+            p = outer.makeelement(qn("w:p"), {})
+            ppr = p.makeelement(qn("w:pPr"), {})
+            ppr.append(ppr.makeelement(qn("w:jc"), {qn("w:val"): "center"}))
+            p.append(ppr)
+            r = p.makeelement(qn("w:r"), {})
+            dr = r.makeelement(qn("w:drawing"), {})
+            dr.append(inline)
+            r.append(dr)
+            p.append(r)
+            outer.append(p)
+            # 칸 줄 높이는 그림에 맞게 '최소'
+            tr = next((a for a in outer.iterancestors() if a.tag == qn("w:tr")), None)
+            h = tr.find(f"{qn('w:trPr')}/{qn('w:trHeight')}") if tr is not None else None
+            if h is not None:
+                h.set(qn("w:hRule"), "atLeast")
+            n += 1
+            break
+    return n
+
+
+def grps_iter(grps):
+    for g in grps:
+        for el in g:
+            yield el
 
 
 def _row_cells(tbl):

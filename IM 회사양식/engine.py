@@ -256,6 +256,17 @@ def _paint_navy(tc):
     tcpr = _first_child(tc, "tcPr")
     shd = tcpr.makeelement(qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): NAVY})
     _put(tcpr, shd)
+    # 칸 안 글자·문단에 남은 바탕(원본 검정 글자 바탕)은 지운다 — 네이비 칸 위에 검은 상자가 떴다(방배동 5. 분양사례 머리글)
+    for p in tc.iter(qn("w:p")):
+        for holder in [p.find(qn("w:pPr"))] + [r.find(qn("w:rPr")) for r in p.iter(qn("w:r"))]:
+            if holder is None:
+                continue
+            for e in list(holder.findall(qn("w:shd"))) + list(holder.findall(qn("w:highlight"))):
+                holder.remove(e)
+            rp = holder.find(qn("w:rPr")) if holder.tag == qn("w:pPr") else None
+            if rp is not None:
+                for e in list(rp.findall(qn("w:shd"))) + list(rp.findall(qn("w:highlight"))):
+                    rp.remove(e)
     # 글씨는 흰색 — 빈 칸에도 박아 둔다(나중에 타이핑하면 흰 글씨로 나오게)
     for p in tc.findall(qn("w:p")):
         ppr = _first_child(p, "pPr")
@@ -503,21 +514,80 @@ def _shaded_number_runs(p):
 
 
 def restyle_shaded_number_headings(doc):
-    """방배동식 대단원(번호 글자 바탕만 칠한 문단) → 번호 바탕 회사 네이비, 번호 흰 글씨. 고친 수."""
+    """방배동식 대단원(번호 글자 바탕만 칠한 문단 '■2■금융 조건') → [정사각 네이비 번호 칸][제목] 1줄 2칸 표.
+    ★글자 바탕은 글자 폭만큼만 칠해져 세로로 긴 직사각형이 됐다(2026-10-13 사용자: '네모로'). 원본 상자는 21×21pt."""
     n = 0
-    for p in doc.element.body.findall(qn("w:p")):
+    body = doc.element.body
+    for p in list(body.findall(qn("w:p"))):
         hit = _shaded_number_runs(p)
         if not hit:
             continue
-        for r in hit[0]:
-            rpr = r.find(qn("w:rPr"))
-            for shd in rpr.findall(qn("w:shd")):
-                shd.set(qn("w:fill"), NAVY)
-            col = rpr.find(qn("w:color"))
-            if col is None:
-                col = rpr.makeelement(qn("w:color"), {})
-                _put(rpr, col)
-            col.set(qn("w:val"), "FFFFFF")
+        shaded, num, title_r = hit
+        idx = list(p).index(title_r)
+        tail = list(p)[idx + 1:]                             # 제목 뒤(줄바꿈 + 소제목 등) → 표 뒤 새 문단으로
+        title = "".join(t.text or "" for t in title_r.findall(qn("w:t"))).strip()
+        rpr_n = copy.deepcopy(shaded[0].find(qn("w:rPr")))
+        rpr_t = copy.deepcopy(title_r.find(qn("w:rPr"))) if title_r.find(qn("w:rPr")) is not None else None
+        sz = rpr_n.find(qn("w:sz")) if rpr_n is not None else None
+        pt = int(sz.get(qn("w:val"))) / 2 if sz is not None and (sz.get(qn("w:val")) or "").isdigit() else 14
+        side = int(round(pt * 1.5 * 20))                    # 정사각 한 변(twips) — 글자 크기의 1.5배(원본 14pt → 21pt)
+        tbl = etree.Element(qn("w:tbl"))
+        tp = etree.SubElement(tbl, qn("w:tblPr"))
+        etree.SubElement(tp, qn("w:tblW"), {qn("w:w"): "0", qn("w:type"): "auto"})
+        ind = p.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+        etree.SubElement(tp, qn("w:tblInd"), {qn("w:w"): (ind.get(qn("w:left")) or "0") if ind is not None else "0",
+                                              qn("w:type"): "dxa"})
+        etree.SubElement(tp, qn("w:tblLayout"), {qn("w:type"): "fixed"})
+        cm = etree.SubElement(tp, qn("w:tblCellMar"))
+        for side_n in ("left", "right"):
+            etree.SubElement(cm, qn("w:" + side_n), {qn("w:w"): "0", qn("w:type"): "dxa"})
+        grid = etree.SubElement(tbl, qn("w:tblGrid"))
+        etree.SubElement(grid, qn("w:gridCol"), {qn("w:w"): str(side)})
+        etree.SubElement(grid, qn("w:gridCol"), {qn("w:w"): "8000"})
+        tr = etree.SubElement(tbl, qn("w:tr"))
+        trp = etree.SubElement(tr, qn("w:trPr"))
+        etree.SubElement(trp, qn("w:trHeight"), {qn("w:val"): str(side), qn("w:hRule"): "exact"})
+        for k, (txt, rpr, w) in enumerate(((num.strip(), rpr_n, side), (title, rpr_t, 8000))):
+            tc = etree.SubElement(tr, qn("w:tc"))
+            tcp = etree.SubElement(tc, qn("w:tcPr"))
+            etree.SubElement(tcp, qn("w:tcW"), {qn("w:w"): str(w), qn("w:type"): "dxa"})
+            if k == 1:
+                etree.SubElement(tcp, qn("w:tcMar")).append(etree.Element(qn("w:left"), {qn("w:w"): "120", qn("w:type"): "dxa"}))
+            etree.SubElement(tcp, qn("w:vAlign"), {qn("w:val"): "center"})
+            cp = etree.SubElement(tc, qn("w:p"))
+            cpp = etree.SubElement(cp, qn("w:pPr"))
+            etree.SubElement(cpp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "240",
+                                                    qn("w:lineRule"): "auto"})
+            etree.SubElement(cpp, qn("w:jc"), {qn("w:val"): "center" if k == 0 else "left"})
+            r = etree.SubElement(cp, qn("w:r"))
+            if rpr is not None:
+                rr = copy.deepcopy(rpr)
+                for e in list(rr.findall(qn("w:shd"))) + list(rr.findall(qn("w:spacing"))):
+                    rr.remove(e)
+                r.append(rr)
+            t = etree.SubElement(r, qn("w:t"))
+            t.text = txt
+            t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            if k == 0:
+                _paint_navy(tc)
+        p.addprevious(tbl)
+        if any("".join(x.text or "" for x in el.iter(qn("w:t"))).strip() for el in tail):
+            rest = etree.Element(qn("w:p"))
+            ppr0 = p.find(qn("w:pPr"))
+            if ppr0 is not None:
+                rest.append(copy.deepcopy(ppr0))
+            for el in tail:
+                if el.tag == qn("w:r") and el.find(qn("w:br")) is not None and not rest.findall(qn("w:r")):
+                    continue                                 # 맨 앞 줄바꿈은 새 문단이 대신한다
+                rest.append(el)
+            p.addprevious(rest)
+        else:
+            gap = etree.Element(qn("w:p"))                   # 표 뒤 빈 문단(다음 표와 붙지 않게)
+            gpp = etree.SubElement(gap, qn("w:pPr"))
+            etree.SubElement(gpp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "120",
+                                                    qn("w:lineRule"): "exact"})
+            p.addprevious(gap)
+        p.getparent().remove(p)
         n += 1
     return n
 
@@ -570,6 +640,15 @@ def center_cells_vertically(doc):
     return n
 
 
+def _is_wrapper(tbl):
+    """1줄 1칸짜리 '껍데기' 표(안에 표가 들어 있는 것) — pdf2docx 가 본문 표 전체를 이렇게 감싸곤 한다(방배동)."""
+    rows = tbl.findall(qn("w:tr"))
+    if len(rows) != 1:
+        return False
+    tcs = rows[0].findall(qn("w:tc"))
+    return len(tcs) == 1 and tcs[0].find(qn("w:tbl")) is not None
+
+
 def paint_headers(doc):
     """머리글 칸을 회사 네이비로. 고친 칸 수를 돌려준다.
 
@@ -583,8 +662,9 @@ def paint_headers(doc):
     frames = [t for t in body.iter(qn("w:tbl")) if _is_frame(t)]
     frame_ids = set(map(id, frames))
     for tbl in body.iter(qn("w:tbl")):
-        if any(True for _ in tbl.iterancestors(qn("w:tbl"))):
+        if any(not _is_wrapper(a) for a in tbl.iterancestors(qn("w:tbl"))):
             continue                                          # 표 안의 표는 전부 원본 색 그대로(2026-10-08 확정, 10-13 이천 대월에서 바로잡음)
+                                                              # ★단 pdf2docx 가 표 전체를 감싼 '1칸짜리 껍데기 표' 는 표로 안 친다(방배동)
         rows = tbl.findall(qn("w:tr"))
         if not rows:
             continue
