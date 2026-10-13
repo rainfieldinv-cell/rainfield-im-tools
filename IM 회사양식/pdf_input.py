@@ -729,6 +729,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["글머리 앞 줄바꿈"] = break_before_bullets(d)
     rep["선만 있는 표 지움"] = drop_grid_tables(d)
     rep["쪼개진 표 합침"] = merge_split_tables(d)
+    rep["칸 안 쪼개진 표 합침"] = merge_split_tables_in_cells(d)
     rep["흰 글씨 칸 바탕"] = fill_white_text_cells(d)
     rep["표 줄 높이 풀어줌"] = loosen_row_heights(d)
     rep["흰 바탕 투명하게"] = clear_white_overlays(d)
@@ -1213,6 +1214,221 @@ def merge_split_tables(d):
                 body.remove(g)
             body.remove(nxt)
             n += 1
+    return n
+
+
+def _tbl_rows_x(tbl):
+    """표의 줄마다 [(시작x, 끝x, 칸)] (twips, 표 들여쓰기 포함)."""
+    from docx.oxml.ns import qn
+    ind = tbl.find(f"{qn('w:tblPr')}/{qn('w:tblInd')}")
+    x0 = float(ind.get(qn("w:w"))) if ind is not None and re.fullmatch(r"-?[\d.]+", ind.get(qn("w:w")) or "") else 0.0
+    out, prev = [], []
+    for tr in tbl.findall(qn("w:tr")):
+        x, row = x0, []
+        for tc in tr.findall(qn("w:tc")):
+            w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            wv = float(w.get(qn("w:w"))) if w is not None and re.fullmatch(r"[\d.]+", w.get(qn("w:w")) or "") else 0.0
+            vm = tc.find(f"{qn('w:tcPr')}/{qn('w:vMerge')}")
+            if vm is not None and vm.get(qn("w:val")) in (None, "continue"):
+                # 세로로 이어지는 칸은 pdf2docx 가 폭을 틀리게 적곤 한다(이천 대월 723 ↔ 위 칸 814) → 위 칸 폭을 쓴다
+                above = next((b for b in prev if abs(b[0] - x) <= 60), None)
+                if above is not None:
+                    wv = above[1] - above[0]
+            row.append((x, x + wv, tc))
+            x += wv
+        out.append((tr, row))
+        prev = row
+    return out
+
+
+def _vmerge_header_cells(tbl):
+    """다시 짠 표의 머리글(칠한 칸) 구역에서, 같은 칸 눈금 위·아래로 이어진 칸 중 글이 하나뿐이면 세로로 합친다.
+    (이천 대월: '구분'·'계' 는 3줄, '계약금' 은 2줄을 세로로 차지하는데 줄마다 따로 칸이 됐다)"""
+    from docx.oxml.ns import qn
+
+    def headish(tc):
+        shd = tc.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+        f = (shd.get(qn("w:fill")) or "").upper() if shd is not None else ""
+        if f not in ("", "AUTO", "FFFFFF"):
+            return True
+        cols = [(c.get(qn("w:val")) or "").upper() for c in tc.iter(qn("w:color"))]
+        return bool(cols) and all(c == "FFFFFF" for c in cols) and \
+            bool("".join(t.text or "" for t in tc.iter(qn("w:t"))).strip())
+
+    head_rows = set()                                      # 칸 대부분이 칠했거나 흰 글씨인 줄 = 머리글 줄
+    for i, tr in enumerate(tbl.findall(qn("w:tr"))):
+        tcs = [tc for tc in tr.findall(qn("w:tc")) if "".join(t.text or "" for t in tc.iter(qn("w:t"))).strip()]
+        if tcs and sum(headish(tc) for tc in tcs) >= 0.6 * len(tcs):
+            head_rows.add(i)
+
+    def fill(tc, r):
+        return r in head_rows
+
+    grid = []                                              # 줄마다 {눈금 시작: (칸, 칸 수)}
+    for tr in tbl.findall(qn("w:tr")):
+        pos, row = 0, {}
+        for tc in tr.findall(qn("w:tc")):
+            gs = tc.find(f"{qn('w:tcPr')}/{qn('w:gridSpan')}")
+            span = int(gs.get(qn("w:val"))) if gs is not None else 1
+            row[pos] = (tc, span)
+            pos += span
+        grid.append(row)
+    cols = sorted({k for row in grid for k in row})
+    for c in cols:
+        r = 0
+        while r < len(grid):
+            run = []
+            while r < len(grid) and c in grid[r] and fill(grid[r][c][0], r) and \
+                    (not run or grid[r][c][1] == run[0][1][1]):
+                run.append((r, grid[r][c]))
+                r += 1
+            if len(run) >= 2:
+                texty = [x for x in run if "".join(t.text or "" for t in x[1][0].iter(qn("w:t"))).strip()]
+                if len(texty) == 1:
+                    import copy
+                    src_tc = texty[0][1][0]
+                    first_tc = run[0][1][0]
+                    if src_tc is not first_tc:                 # 글을 맨 위 칸으로 옮긴다
+                        for p in first_tc.findall(qn("w:p")):
+                            first_tc.remove(p)
+                        for p in src_tc.findall(qn("w:p")):
+                            first_tc.append(copy.deepcopy(p))
+                    for k, (_, (tc, _)) in enumerate(run):
+                        pr = tc.find(qn("w:tcPr"))
+                        vm = pr.find(qn("w:vMerge"))
+                        if vm is None:
+                            vm = pr.makeelement(qn("w:vMerge"), {})
+                            after = next((pr.find(qn(t)) for t in ("w:tcBorders", "w:shd", "w:noWrap", "w:tcMar",
+                                                                    "w:textDirection", "w:tcFitText", "w:vAlign",
+                                                                    "w:hideMark") if pr.find(qn(t)) is not None), None)
+                            after.addprevious(vm) if after is not None else pr.append(vm)
+                        if k == 0:
+                            vm.set(qn("w:val"), "restart")
+                        else:
+                            vm.attrib.pop(qn("w:val"), None)
+                            for p in tc.findall(qn("w:p")):
+                                for rr in p.findall(qn("w:r")):
+                                    p.remove(rr)
+            if not run:
+                r += 1
+
+
+def merge_split_tables_in_cells(d):
+    """칸 안에서 한 표가 여러 표로 쪼개지고(칸 경계도 서로 조금 다름) 세로로 합친 칸 글이 따로 떨어진 것을 다시 한 표로.
+    ★이천 대월 '중도금대출 일정표'(2026-10-12 사용자 지적): [위 머리줄 표] '계약금' 문단 [가운데 3줄 표] [납입주체 표] 로
+    쪼개져 '계약금' 이 따로 놀았다. → 모든 표의 칸 경계를 모아 하나의 칸 눈금으로 다시 짜고, 떨어진 짧은 글은
+    그 문단 들여쓰기 위치에 해당하는 위 표 마지막 줄의 빈 칸에 넣는다.
+    조건: 같은 칸 안, 사이엔 빈 문단이나 짧은 글(8자 이하) 문단만, 바깥 왼쪽·오른쪽 끝이 서로 3pt 안."""
+    import copy
+    from docx.oxml.ns import qn
+    n = 0
+    for tc_outer in list(d.element.body.iter(qn("w:tc"))):
+        kids = [k for k in tc_outer if k.tag in (qn("w:p"), qn("w:tbl"))]
+        i = 0
+        while i < len(kids):
+            if kids[i].tag != qn("w:tbl"):
+                i += 1
+                continue
+            group, gaps, j = [kids[i]], [], i + 1
+            while j < len(kids):
+                k = kids[j]
+                if k.tag == qn("w:p"):
+                    txt = "".join(t.text or "" for t in k.iter(qn("w:t"))).strip()
+                    if len(txt) > 8 or k.find(".//" + qn("w:drawing")) is not None:
+                        break
+                    gaps.append((len(group), k, txt))
+                    j += 1
+                    continue
+                a, b = _tbl_rows_x(group[0]), _tbl_rows_x(k)
+                if not a or not b or not a[0][1] or not b[0][1]:
+                    break
+                if abs(a[0][1][0][0] - b[0][1][0][0]) > 60 or abs(a[0][1][-1][1] - b[0][1][-1][1]) > 60:
+                    break
+                group.append(k)
+                j += 1
+            # 끝에 붙은 빈 문단은 묶음에서 뺀다
+            while gaps and gaps[-1][0] == len(group):
+                gaps.pop()
+            # ★표 사이에 '떨어진 글'(계약금 같은 짧은 글)이 있을 때만 합친다 — 그런 게 없으면 원래 잘 나온 표
+            #   (이천 대월 사업진행현황: 합쳤더니 '2025.10 실착공' 줄이 깨졌다)
+            if len(group) < 2 or not any(txt for _, _, txt in gaps):
+                i = j
+                continue
+            rows = []
+            for gi, t in enumerate(group):
+                for tr, row in _tbl_rows_x(t):
+                    rows.append((gi, tr, row))
+            # 떨어진 짧은 글 → 바로 위 표 마지막 줄에서 그 위치의 빈 칸으로
+            for gi, p, txt in gaps:
+                if not txt or gi == 0:
+                    continue
+                ind = p.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+                px = float(ind.get(qn("w:left"))) if ind is not None and re.fullmatch(r"-?[\d.]+", ind.get(qn("w:left")) or "") else 0.0
+                last = [r for r in rows if r[0] == gi - 1][-1][2]
+                for x0, x1, tc in last:
+                    if x0 - 20 <= px < x1 and not "".join(t.text or "" for t in tc.iter(qn("w:t"))).strip():
+                        tp = next(iter(tc.findall(qn("w:p"))), None)
+                        if tp is not None:
+                            tc.remove(tp)
+                        newp = copy.deepcopy(p)
+                        ind2 = newp.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+                        if ind2 is not None:
+                            ind2.set(qn("w:left"), "0")
+                        jc = newp.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+                        if jc is not None:
+                            jc.set(qn("w:val"), "center")
+                        for sh in list(newp.iter(qn("w:shd"))) + list(newp.iter(qn("w:highlight"))):
+                            sh.getparent().remove(sh)             # 문단·글자 바탕(검은 상자)은 칸 색에 맡긴다
+                        tc.append(newp)
+                        break
+            # 칸 경계 모으기(40twips 안은 같은 경계)
+            xs = sorted(x for _, _, row in rows for x0, x1, _ in row for x in (x0, x1))
+            edges = []
+            for x in xs:
+                if not edges or x - edges[-1][-1] > 40:
+                    edges.append([x])
+                else:
+                    edges[-1].append(x)
+            E = [sum(e) / len(e) for e in edges]
+
+            def snap(x):
+                return min(range(len(E)), key=lambda k: abs(E[k] - x))
+            base = group[0]
+            grid = base.find(qn("w:tblGrid"))
+            for g in list(grid):
+                grid.remove(g)
+            for k in range(len(E) - 1):
+                grid.append(grid.makeelement(qn("w:gridCol"), {qn("w:w"): str(int(round(E[k + 1] - E[k])))}))
+            ind = base.find(f"{qn('w:tblPr')}/{qn('w:tblInd')}")
+            if ind is not None:
+                ind.set(qn("w:w"), str(int(round(E[0]))))
+            for gi, tr, row in rows:
+                for x0, x1, tc in row:
+                    a, b = snap(x0), snap(x1)
+                    span = max(1, b - a)
+                    pr = tc.find(qn("w:tcPr"))
+                    w = pr.find(qn("w:tcW"))
+                    if w is not None:
+                        w.set(qn("w:w"), str(int(round(E[b] - E[a]))))
+                    gs = pr.find(qn("w:gridSpan"))
+                    if span > 1:
+                        if gs is None:
+                            gs = pr.makeelement(qn("w:gridSpan"), {})
+                            w.addnext(gs) if w is not None else pr.insert(0, gs)
+                        gs.set(qn("w:val"), str(span))
+                    elif gs is not None:
+                        pr.remove(gs)
+                if gi > 0:
+                    base.append(tr)
+            for t in group[1:]:
+                tc_outer.remove(t)
+            for _, p, _ in gaps:
+                if p.getparent() is tc_outer:
+                    tc_outer.remove(p)
+            _vmerge_header_cells(base)
+            n += 1
+            kids = [k for k in tc_outer if k.tag in (qn("w:p"), qn("w:tbl"))]
+            i = kids.index(base) + 1
     return n
 
 

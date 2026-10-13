@@ -284,6 +284,52 @@ def _is_frame(tbl):
     return wide and bool(f) and _lum(f) < 0.5
 
 
+_SEC_NO_RE = re.compile(r"\s*(\d{1,2}|[IVX]{1,4}|[Ⅰ-Ⅻ])\.?\s*")
+
+
+def restyle_section_headings(doc):
+    """원본 대단원 제목 띠 [색 칠한 번호 칸][제목 + 밑줄] → 회사 모양: 번호 칸 네이비 + 흰 번호, 밑줄은 뺀다.
+    번호·제목 글은 그대로(2026-10-12 사용자 확정, 그림판 그림: 노란 '3' 상자+노란 밑줄 → 네이비 '3' 상자).
+    조건: 맨 바깥 표, 1줄 2칸, 첫 칸이 칠해져 있고 글이 번호(1·2·Ⅰ·II…)뿐, 둘째 칸 글이 짧다(40자 이하)."""
+    n = 0
+    body = doc.element.body
+    for tbl in list(body.iter(qn("w:tbl"))):
+        if any(a.tag == qn("w:tbl") for a in tbl.iterancestors()):
+            continue
+        rows = tbl.findall(qn("w:tr"))
+        if len(rows) != 1:
+            continue
+        cells = rows[0].findall(qn("w:tc"))
+        if len(cells) != 2:
+            continue
+        num_txt = "".join(t.text or "" for t in cells[0].iter(qn("w:t")))
+        title = "".join(t.text or "" for t in cells[1].iter(qn("w:t"))).strip()
+        if not _SEC_NO_RE.fullmatch(num_txt or "x") or not title or len(title) > 40:
+            continue
+        fills = [_fill(tc) for tc in cells[0].iter(qn("w:tc"))]
+        if not any(fills):
+            continue
+        for tc in cells[0].iter(qn("w:tc")):                 # 번호 칸(안쪽 표 칸까지) 네이비 + 테두리 네이비
+            _paint_navy(tc)
+            b = tc.find(f"{qn('w:tcPr')}/{qn('w:tcBorders')}")
+            if b is not None:
+                for e in b:
+                    if e.get(qn("w:val")) not in (None, "nil", "none"):
+                        e.set(qn("w:color"), NAVY)
+        for r in cells[0].iter(qn("w:r")):
+            rpr = r.find(qn("w:rPr"))
+            if rpr is not None:
+                col = rpr.find(qn("w:color"))
+                if col is not None:
+                    col.set(qn("w:val"), "FFFFFF")
+        b = cells[1].find(f"{qn('w:tcPr')}/{qn('w:tcBorders')}")   # 제목 칸 밑줄·옆줄 빼기
+        if b is not None:
+            for e in list(b):
+                b.remove(e)
+        n += 1
+    return n
+
+
 def center_cells_vertically(doc):
     """모든 표 칸의 글을 세로 가운데로(가로는 원본 그대로). 2026-10-12 사용자 확정 '표 글은 무조건 셀 가운데'.
     pdf2docx 는 칸 안 위치를 문단 '앞 간격' 으로 맞춰 두므로, 그 간격(첫 문단 앞)을 없애야 진짜 가운데가 된다."""
@@ -1204,6 +1250,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     apply_fonts(doc)
     rep["머리글 칸"] = paint_headers(doc)
     rep["세로 가운데 칸"] = center_cells_vertically(doc)
+    rep["대단원 제목 회사 모양"] = restyle_section_headings(doc)
 
     body = doc.element.body
     # 원본 구역들: 쪽번호를 처음부터 다시 세는 설정 지우기(표지부터 이어 세게)
