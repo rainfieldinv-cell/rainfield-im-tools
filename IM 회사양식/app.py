@@ -2,7 +2,7 @@
 """IM 회사양식 — 원본 IM(PDF)을 내용 그대로 두고 회사 양식만 입혀 워드로.
 
 바꾸는 것   : 표지 · 위 머리말 · 아래 회사 로고 · 글꼴(Pretendard) · 표 머리글 색(회사 네이비) · 맨 끝 연락처 쪽
-더하는 것   : 회사 Investment Highlight 쪽(원본 하이라이트 대신) → Ⅰ. 사모사채 개요
+더하는 것   : 사모사채 개요 + 금융 구조도 (원본 하이라이트 뒤)
 안 바꾸는 것: 내용 · 원본 1쪽 = 결과 1쪽
 규격        : 회사 양식(A4·여백·머리말/꼬리말) 고정. 원본 쪽이 크면 비율 그대로 줄여 넣는다.
 받는 것     : **PDF 만**(2026-10-08 사용자 확정 — 워드 원본은 결과가 엉망이라, 워드뿐이면 PDF 로 저장해 올리라고 안내)
@@ -83,6 +83,12 @@ def _field(label, store, default="", help=None):
     return val
 
 
+def _diagram_fin():
+    g = lambda k: (SS.get(f"cf_dg_{k}") or "").strip()
+    return {"차주": g("차주"), "신탁": g("신탁"), "연대보증": g("연대보증"), "브릿지": g("브릿지"),
+            "본건": {"금액": g("금액"), "LTV": g("LTV"), "금리": g("금리"), "담보": g("담보")}}
+
+
 def _prepare(name, data):
     """원본에서 표지 제목·사진·하이라이트 쪽·끝쪽을 뽑아 보관한다(올릴 때 한 번)."""
     import fitz
@@ -107,6 +113,16 @@ def _prepare(name, data):
     SS["cf_highlight"] = info["highlight"]
     SS["cf_drop_cover"] = True
     SS["cf_drop_tail"] = bool(info["last_contact"])
+    defaults = engine.read_bond_defaults()                   # 양식 표의 기본 글(TBD 등) — 고쳐 쓰면 된다
+    for row in BOND_ROWS:
+        SS[f"cf_bond_{row}"] = defaults.get(row, "")
+        SS.pop(f"w_cf_bond_{row}", None)
+    dg = pdf_input.diagram_defaults(data)                    # 금융 구조도 칸: 원본에서 읽은 값(못 읽으면 빈칸)
+    for key, val in (("차주", dg["차주"]), ("신탁", dg["신탁"]), ("금액", dg["본건"]["금액"]),
+                     ("LTV", dg["본건"]["LTV"]), ("금리", dg["본건"]["금리"]), ("담보", ""),
+                     ("연대보증", dg["연대보증"]), ("브릿지", "")):
+        SS[f"cf_dg_{key}"] = val
+        SS.pop(f"w_cf_dg_{key}", None)
     for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages"):
         SS.pop(k, None)
 
@@ -166,7 +182,7 @@ if step == 1:
           <li>글꼴(Pretendard) · 표 머리글 색(회사 네이비)</li>
           <li>맨 끝 연락처 쪽</li>
         </ul>
-        <div style="margin-top:8px;"><b>더하는 것</b> : 회사 Investment Highlight 쪽(원본 하이라이트 대신) → Ⅰ. 사모사채 개요</div>
+        <div style="margin-top:8px;"><b>더하는 것</b> : 사모사채 개요 + 금융 구조도 (원본 하이라이트 바로 뒤)</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -279,9 +295,10 @@ elif step == 2:
                 st.image(SS["cf_photo_custom"], caption="✅ 직접 올린 사진을 씁니다", width=260)
 
         st.markdown("---")
-        st.markdown("#### Ⅰ. 사모사채 개요")
-        st.caption("왼쪽 구분은 항상 같고, 오른쪽 내용만 이번 딜에 맞게 적어 주세요. 비워 둔 칸은 빈칸으로 들어갑니다. "
-                   "회사 Investment Highlight 쪽 바로 다음 쪽에 들어갑니다.")
+        st.markdown("#### 사모사채 개요")
+        st.caption("왼쪽 구분은 항상 같고, 오른쪽 내용만 이번 딜에 맞게 고쳐 주세요. 처음엔 회사 양식의 기본 글"
+                   "(TBD·[000] 등)이 들어 있습니다. 제목의 번호와 모양은 원본 대단원과 같게 자동으로 맞춥니다. "
+                   "원본 하이라이트(Executive Summary 등) 바로 뒤에 들어갑니다.")
         for row in BOND_ROWS:
             k1, k2 = st.columns([1, 4])
             k1.markdown(f"<div style='padding-top:8px;font-weight:700;color:#08377C;'>{row}</div>",
@@ -290,6 +307,26 @@ elif step == 2:
                 SS.setdefault(f"cf_bond_{row}", "")
                 SS[f"cf_bond_{row}"] = st.text_input(row, value=SS[f"cf_bond_{row}"],
                                                      key=f"w_cf_bond_{row}", label_visibility="collapsed")
+
+        st.markdown("---")
+        st.markdown("#### 금융 구조도")
+        st.caption("사모사채 개요 바로 아래에 들어가는 회사 구조도입니다(기존 IM 도구와 같은 모양). "
+                   "원본에서 읽을 수 있는 값은 미리 채워 두었으니 확인하고 고쳐 주세요. 비운 칸은 기본 글"
+                   "('차주', '부동산담보신탁(신탁사)')로 들어가고, 연대보증·브릿지 대출은 비우면 그 상자가 빠집니다. "
+                   "원본에 있던 구조도 그림 줄은 결과에서 지웁니다.")
+        DG = [("차주", "차주 (회사 이름)"), ("신탁", "신탁사"), ("금액", "본건 대출금액 (예: [45]억원)"),
+              ("LTV", "LTV (예: 38.3%)"), ("금리", "금리 (예: [T.B.D]%)"), ("담보", "담보 (예: 연립주택 8세대 1순위 담보신탁)"),
+              ("연대보증", "연대보증 (없으면 비움)"), ("브릿지", "브릿지 대출 (없으면 비움)")]
+        g1, g2 = st.columns(2)
+        for i, (key, label) in enumerate(DG):
+            with (g1 if i % 2 == 0 else g2):
+                SS.setdefault(f"cf_dg_{key}", "")
+                SS[f"cf_dg_{key}"] = st.text_input(label, value=SS[f"cf_dg_{key}"], key=f"w_cf_dg_{key}")
+        try:
+            import diagram
+            st.image(diagram.render_png(_diagram_fin()), caption="미리보기", use_container_width=True)
+        except Exception as e:
+            st.caption(f"(미리보기를 그리지 못했습니다: {e})")
 
     st.markdown("---")
     p1, _sp, p3 = st.columns([2, 4, 2])
@@ -354,15 +391,13 @@ elif step == 3:
                     "체크하면 그 쪽 내용이 통째로 빠집니다. (본문 쪽 안의 담당자 연락처는 체크하지 않아도 위처럼 "
                     "자동으로 지웁니다.)")
 
-        st.markdown("#### 원본 하이라이트 쪽 (빼고 회사 Investment Highlight 쪽으로 바꿉니다)")
+        st.markdown("#### 하이라이트 쪽 (사모사채 개요가 이 뒤에 들어갑니다)")
         found = info.get("highlight") or []
         st.caption(("원본에서 하이라이트로 보이는 쪽을 찾았습니다 : **" + ", ".join(f"{p}쪽" for p in found) + "**. "
                     if found else "원본에서 하이라이트 쪽을 찾지 못했습니다. ")
-                   + "여기서 고른 원본 쪽은 **결과에서 빠지고**, 그 자리에 회사 양식의 **Investment Highlight 쪽"
-                   "(Overview·Deal Highlight)** 이 표지 바로 다음에 들어갑니다. 그 쪽 내용은 양식 그대로 들어가니 "
-                   "워드에서 이번 딜에 맞게 고쳐 쓰세요. 그 다음 쪽에 Ⅰ. 사모사채 개요가 나옵니다. "
-                   "아래 쪽 그림을 보고 원본의 하이라이트(Executive Summary 등) 쪽을 고르세요. "
-                   "아무것도 안 고르면 원본 쪽은 하나도 빠지지 않습니다.")
+                   + "원본 하이라이트(Executive Summary 등)는 **그대로 두고**, 그 바로 뒤에 사모사채 개요와 "
+                   "금융 구조도를 넣습니다. 아래 쪽 그림을 보고 하이라이트 쪽을 맞게 고르세요. 하이라이트 마지막 쪽에 "
+                   "여백이 넉넉하면 그 여백에 이어서, 꽉 차 있으면 다음 쪽에 넣습니다. 못 고르면 표지 바로 다음 쪽에 넣습니다.")
         if "cf_thumbs" not in SS:
             SS["cf_thumbs"] = [pdf_input.page_png(SS["cf_bytes"], i, zoom=0.35) for i in range(1, min(n, 9))]
         tcols = st.columns(len(SS["cf_thumbs"]) or 1)
@@ -396,13 +431,13 @@ elif step == 3:
                 def _prog(v, msg):
                     bar.progress(min(max(v, 0.0), 1.0), text=f"만드는 중입니다… {msg}")
                 body, rep1 = pdf_input.convert(SS["cf_bytes"], drop_cover=SS.get("cf_drop_cover", True),
-                                               drop_last=SS.get("cf_drop_tail", False), progress=_prog,
-                                               drop_pages=SS.get("cf_highlight") or [])
-                _prog(0.98, "표지·하이라이트·사모사채 개요·연락처 넣는 중…")
-                place = None                                     # 개요는 회사 하이라이트 쪽 바로 다음(새 쪽)
+                                               drop_last=SS.get("cf_drop_tail", False), progress=_prog)
+                _prog(0.98, "표지·사모사채 개요·금융 구조도·연락처 넣는 중…")
+                place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])   # 개요는 원본 하이라이트 뒤
                 out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
                                          header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
-                                         photo=photo, bond=bond, bond_place=place)
+                                         photo=photo, bond=bond, bond_place=place,
+                                         diagram_png=__import__("diagram").render_png(_diagram_fin()))
                 bar.empty()
                 SS["cf_out"] = out
                 SS["cf_rep"] = {**rep1, **rep2}
@@ -428,8 +463,7 @@ elif step == 3:
                     + (f" (회사 양식보다 커서 {min(p['비율'] for p in small) * 100:.0f}~"
                        f"{max(p['비율'] for p in small) * 100:.0f}% 로 줄인 쪽 {len(small)}개)." if small else "."),
                     f"표 머리글 칸 {rep.get('머리글 칸', 0)}개를 회사 네이비로 바꿨습니다.",
-                    "표지 다음에 회사 Investment Highlight 쪽, 그 다음 쪽에 Ⅰ. 사모사채 개요를 넣었습니다. "
-                    "**하이라이트 쪽 내용은 양식 그대로이니 워드에서 이번 딜에 맞게 고쳐 주세요.**"]
+                    f"사모사채 개요·금융 구조도 : {rep.get('개요 자리', '')}."]
             if rep.get("원본 하이라이트 뺀 쪽"):
                 done.append("원본 하이라이트 쪽을 뺐습니다 : " + ", ".join(f"{p}쪽" for p in rep["원본 하이라이트 뺀 쪽"]) + ".")
             if rep.get("원본 표지 뺌"):

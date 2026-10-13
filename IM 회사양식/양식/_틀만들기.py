@@ -42,7 +42,9 @@ def main():
             for old, new in [("신촌지역 정비4구역 4-12, 4-1지구", "사업명"), ("브릿지대출 사모사채 제안서", "사모사채 제안서")]:
                 x = x.replace(old, new)
             # 사모사채 개요 표의 내용 칸 글을 지운다(구분 칸은 둔다)
-            x = re.sub(r"(<w:tbl>.*?사모사채명.*?</w:tbl>)", _clear_values, x, count=1, flags=re.S)
+            # 사모사채 개요 표의 기본 글은 둔다(2026-10-13 양식: 'TBD(신규 유동화 SPC)…' 같은 공통 문구가 기본값).
+            # 실제 딜 이름만 지운다.
+            x = _genericize_deal(x)
             data = _clear_highlight(x.encode("utf-8"))
         elif re.match(r"word/header\d+\.xml$", item.filename):
             x = data.decode("utf-8")
@@ -88,6 +90,26 @@ def _clear_highlight(xml):
             for t in ts[1:]:
                 t.text = ""
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _genericize_deal(x):
+    """사모사채 개요 '기초자산' 칸의 실제 딜 이름(고산3지구 등)을 'OOO' 로. 글이 여러 조각이라 칸 단위로 고친다."""
+    from lxml import etree
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    root = etree.fromstring(x.encode("utf-8"))
+    for tr in root.iter(W + "tr"):
+        tcs = tr.findall(W + "tc")
+        if len(tcs) >= 2 and "".join(t.text or "" for t in tcs[0].iter(W + "t")).strip() == "기초자산":
+            ts = list(tcs[-1].iter(W + "t"))
+            full = "".join(t.text or "" for t in ts)
+            m = re.search(r"\S*?\d?\s*지구\s*", full)
+            if m:
+                full = full[:m.start()] + "OOO " + full[m.end():]
+            if ts:
+                ts[0].text = full
+                for t in ts[1:]:
+                    t.text = ""
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True).decode("utf-8")
 
 
 def _page_no_8(xml):

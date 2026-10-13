@@ -34,7 +34,7 @@ TOP_CM, BOTTOM_CM, LEFT_CM, RIGHT_CM = 3.0, 2.5, 2.5, 2.5
 HEADER_CM, FOOTER_CM = 1.7, 1.2
 BOX_W_PT = (PAGE_W - LEFT_CM - RIGHT_CM) / 2.54 * 72        # 본문 칸 가로(pt)
 BOX_H_PT = (PAGE_H - TOP_CM - BOTTOM_CM) / 2.54 * 72        # 본문 칸 세로(pt)
-HEIGHT_SAFETY = 0.92  # 글꼴이 Pretendard 로 바뀌면 줄이 조금 높아진다 → 세로는 8% 여유(5% 로는 등촌역 쪽 몇 개가 넘쳤다)
+HEIGHT_SAFETY = 0.89  # 글꼴이 Pretendard 로 바뀌면 줄이 조금 높아진다 → 세로는 8% 여유(5% 로는 등촌역 쪽 몇 개가 넘쳤다)
 
 PAGE_NO_RE = re.compile(r"[-–\s]*(?:page\s*)?\d{1,3}(?:\s*(?:/|of)\s*\d{1,3})?[-–\s]*", re.I)
 HIGHLIGHT_RE = re.compile(r"executive\s*summary|investment\s*highlight|투자\s*하이라이트|투자\s*포인트|"
@@ -87,7 +87,7 @@ def find_highlight_pages(pdf_bytes):
     hits = []
     for i in range(1, min(doc.page_count, 7)):
         top = doc[i].get_text("text", clip=fitz.Rect(0, 0, doc[i].rect.width, doc[i].rect.height * 0.35))
-        if HIGHLIGHT_RE.search(top) and highlight_band(doc[i]) is None:
+        if HIGHLIGHT_RE.search(top):
             hits.append(i + 1)
         elif hits:
             break
@@ -656,7 +656,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["그림 글씨 고침"] = fix_image_text(doc)
     # 하이라이트와 본문이 섞인 쪽(표지 다음 6쪽 안) → 하이라이트 부분만 지운다(회사 하이라이트 쪽으로 대체)
     rep["원본 하이라이트 일부 지운 쪽"] = []
-    for i in [k for k in keep if 1 <= k <= 6]:
+    for i in []:                       # 2026-10-13 끔: 회사 하이라이트 쪽을 안 쓰므로 원본 하이라이트를 지우지 않는다
         band = highlight_band(doc[i])
         if band is None:
             continue
@@ -722,7 +722,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
             r = (fitz.Rect(shape.bbox) & cell).get_area() / area
             if r > best_r:
                 best, best_r = shape, r
-        if best is not None and best_r >= 0.6:
+        if False and best is not None and best_r >= 0.6:   # 2026-10-13 끔: 망가진 표에 검은 덩어리를 퍼뜨림(방배동). 빠진 머리글 색은 fill_white_text_cells 가 채운다
             self.shading = best
     _CS.parse_shading = _loose_shading
     try:
@@ -761,7 +761,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     _done0 = [k for k in keep if k not in ignored]
     rep["망가진 안쪽 표 그림으로"] = []
     for (_secs, _grps), k in zip(_pages(d), _done0):
-        if fix_broken_nested_tables(d, _grps, _orig[k]):
+        if clean_broken_nested_tables(d, _grps):   # 2026-10-13 끔: 그림(색 안 바뀜)·다시 짜기(그림·글 빠짐) 둘 다 사용자 기준 미달
             rep["망가진 안쪽 표 그림으로"].append(k + 1)
     rep["워드에서 지운 머리말 줄"] = drop_paragraphs(d, set(leftover))
     # fix_wrap_tabs(줄바꿈 탭→띄어쓰기)는 안 쓴다 — 목차·글머리 줄을 이어 붙여 원본을 망가뜨렸다(내곡동, 2026-10-12).
@@ -1289,6 +1289,240 @@ def _fill_vmerge_continues(d):
             above = row
 
 
+def _hex(rgb):
+    return "%02X%02X%02X" % tuple(max(0, min(255, int(round(c * 255)))) for c in rgb[:3])
+
+
+def rebuild_table_from_pdf(page, region, W_scale=1.0):
+    """원본 PDF 의 선(얇은 네모)·칠·글로 그 자리 표를 워드 표(w:tbl 요소)로 다시 짠다. 실패하면 None.
+    ★pdf2docx 가 '표 안의 표' 를 칸 속 작은 표 조각들로 망가뜨린 경우(방배동 금융조건, 2026-10-13)에만 쓴다.
+    안쪽 표까지 한 장의 표(칸 합치기)로 평평하게 만든다 — 보이는 모양은 원본과 같다."""
+    from docx.oxml.ns import qn
+    from lxml import etree
+    reg = fitz.Rect(region) + (-1.5, -1.5, 1.5, 1.5)
+    lines, fills = [], []
+    for dr in page.get_drawings():
+        for it in dr["items"]:
+            if it[0] == "re":
+                r = fitz.Rect(it[1])
+            elif it[0] == "l":
+                r = fitz.Rect(it[1], it[2]).normalize()
+                w = max(dr.get("width") or 0.5, 0.3)
+                r = r + ((-w / 2, 0, w / 2, 0) if r.width < 0.1 else (0, -w / 2, 0, w / 2))
+            else:
+                continue
+            if not reg.contains(r):
+                continue
+            col = dr.get("fill") or dr.get("color")
+            if col is None:
+                continue
+            if min(r.width, r.height) <= 1.6 and max(r.width, r.height) >= 2:
+                lines.append((r, col))
+            elif r.width > 3 and r.height > 3 and dr.get("fill") is not None:
+                fills.append((r, dr["fill"]))
+    hl = [(r, c) for r, c in lines if r.width >= r.height]
+    vl = [(r, c) for r, c in lines if r.height > r.width]
+    if len(hl) < 2 or len(vl) < 1:
+        return None
+
+    def cluster(vals, tol=1.6):
+        out = []
+        for v in sorted(vals):
+            if out and v - out[-1][-1] <= tol:
+                out[-1].append(v)
+            else:
+                out.append([v])
+        return [sum(c) / len(c) for c in out]
+    xs = cluster([r.x0 + r.width / 2 for r, _ in vl] + [r.x0 for r, _ in hl] + [r.x1 for r, _ in hl])
+    ys = cluster([r.y0 + r.height / 2 for r, _ in hl] + [r.y0 for r, _ in vl] + [r.y1 for r, _ in vl])
+    xs = [x for x in xs if reg.x0 <= x <= reg.x1]
+    ys = [y for y in ys if reg.y0 <= y <= reg.y1]
+    # 너무 가는 칸(선 두께 차이로 생긴 것)은 없앤다
+    xs = [x for i, x in enumerate(xs) if i == 0 or x - xs[i - 1] > 2.2]
+    ys = [y for i, y in enumerate(ys) if i == 0 or y - ys[i - 1] > 2.2]
+    nx, ny = len(xs) - 1, len(ys) - 1
+    if nx < 1 or ny < 1 or nx > 40 or ny > 60:
+        return None
+
+    def h_line(j, i):            # 줄 i 위쪽 가로선(눈금 y[i])이 칸 j 를 덮나
+        y, x0, x1 = ys[i], xs[j], xs[j + 1]
+        for r, c in hl:
+            if abs(r.y0 + r.height / 2 - y) <= 1.6 and r.x0 <= x0 + 1.5 and r.x1 >= x1 - 1.5:
+                return c, r.height
+        return None
+
+    def v_line(j, i):            # 칸 j 왼쪽 세로선(눈금 x[j])이 줄 i 를 덮나
+        x, y0, y1 = xs[j], ys[i], ys[i + 1]
+        for r, c in vl:
+            if abs(r.x0 + r.width / 2 - x) <= 1.6 and r.y0 <= y0 + 1.5 and r.y1 >= y1 - 1.5:
+                return c, r.width
+        return None
+
+    def fill_at(cx, cy):
+        best = None
+        for r, c in fills:
+            if r.contains(fitz.Point(cx, cy)) and (best is None or r.get_area() < best[0].get_area()):
+                best = (r, c)
+        return best[1] if best else None
+    # 칸 묶기: 가로로 세로선이 없으면 잇고, 세로로 가로선이 없고 같은 폭이면 잇는다
+    owner = {}
+    cells = []
+    for i in range(ny):
+        j = 0
+        while j < nx:
+            k = j + 1
+            while k < nx and v_line(k, i) is None:
+                k += 1
+            cells.append({"r0": i, "r1": i + 1, "c0": j, "c1": k})
+            j = k
+    for c in cells:
+        owner[(c["r0"], c["c0"])] = c
+    merged = []
+    for c in sorted(cells, key=lambda c: (c["r0"], c["c0"])):
+        if c.get("gone"):
+            continue
+        i = c["r1"]
+        while i < ny:
+            below = owner.get((i, c["c0"]))
+            if below is None or below["c1"] != c["c1"] or below.get("gone"):
+                break
+            if any(h_line(j, i) is not None for j in range(c["c0"], c["c1"])):
+                break
+            below["gone"] = True
+            c["r1"] = i + 1
+            i += 1
+        merged.append(c)
+    # 글 넣기
+    words = page.get_text("dict", clip=reg)["blocks"]
+    spans = []
+    for b in words:
+        for l in b.get("lines", []):
+            for s in l["spans"]:
+                if s["text"].strip():
+                    sr = fitz.Rect(s["bbox"])
+                    if xs[0] - 1 <= sr.x0 + sr.width / 2 <= xs[-1] + 1 and ys[0] - 1 <= sr.y0 + sr.height / 2 <= ys[-1] + 1:
+                        spans.append((sr, s, l))          # 표 테두리 안의 글만(표 밖 각주는 원래 자리에 남긴다)
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    tbl = etree.Element(qn("w:tbl"))
+    tp = etree.SubElement(tbl, qn("w:tblPr"))
+    etree.SubElement(tp, qn("w:tblW"), {qn("w:w"): "0", qn("w:type"): "auto"})
+    etree.SubElement(tp, qn("w:tblLayout"), {qn("w:type"): "fixed"})
+    cm = etree.SubElement(tp, qn("w:tblCellMar"))
+    for s_ in ("top", "left", "bottom", "right"):
+        etree.SubElement(cm, qn("w:" + s_), {qn("w:w"): "0" if s_ in ("top", "bottom") else "40", qn("w:type"): "dxa"})
+    grid = etree.SubElement(tbl, qn("w:tblGrid"))
+    for j in range(nx):
+        etree.SubElement(grid, qn("w:gridCol"), {qn("w:w"): str(int(round((xs[j + 1] - xs[j]) * 20 * W_scale)))})
+    by_row = {}
+    for c in merged:
+        by_row.setdefault(c["r0"], []).append(c)
+    cont = {}                     # (줄, 칸 시작) → 위에서 이어지는 칸
+    for c in merged:
+        for i in range(c["r0"] + 1, c["r1"]):
+            cont.setdefault(i, []).append(c)
+
+    def border_el(tcb, side, ln):
+        if ln is None:
+            etree.SubElement(tcb, qn("w:" + side), {qn("w:val"): "nil"})
+        else:
+            col, th = ln
+            etree.SubElement(tcb, qn("w:" + side), {qn("w:val"): "single", qn("w:sz"): str(max(2, int(round(th * 8)))),
+                                                   qn("w:color"): _hex(col)})
+    for i in range(ny):
+        tr = etree.SubElement(tbl, qn("w:tr"))
+        trp = etree.SubElement(tr, qn("w:trPr"))
+        etree.SubElement(trp, qn("w:trHeight"), {qn("w:val"): str(int(round((ys[i + 1] - ys[i]) * 20 * W_scale))),
+                                                  qn("w:hRule"): "atLeast"})
+        row = sorted(by_row.get(i, []) + [dict(c, _cont=True) for c in cont.get(i, [])], key=lambda c: c["c0"])
+        for c in row:
+            tc = etree.SubElement(tr, qn("w:tc"))
+            tcp = etree.SubElement(tc, qn("w:tcPr"))
+            span = c["c1"] - c["c0"]
+            etree.SubElement(tcp, qn("w:tcW"), {qn("w:w"): str(int(round((xs[c["c1"]] - xs[c["c0"]]) * 20 * W_scale))),
+                                                qn("w:type"): "dxa"})
+            if span > 1:
+                etree.SubElement(tcp, qn("w:gridSpan"), {qn("w:val"): str(span)})
+            if c["r1"] - c["r0"] > 1:
+                etree.SubElement(tcp, qn("w:vMerge"), {} if c.get("_cont") else {qn("w:val"): "restart"})
+            tcb = etree.SubElement(tcp, qn("w:tcBorders"))
+            border_el(tcb, "top", h_line(c["c0"], c["r0"]))
+            border_el(tcb, "left", v_line(c["c0"], i))
+            border_el(tcb, "bottom", h_line(c["c0"], c["r1"]) if c["r1"] <= ny - 1 or True else None)
+            border_el(tcb, "right", v_line(c["c1"], i) if c["c1"] < len(xs) - 1 else None)
+            rect = fitz.Rect(xs[c["c0"]], ys[c["r0"]], xs[c["c1"]], ys[c["r1"]])
+            f = fill_at(rect.x0 + rect.width / 2, rect.y0 + rect.height / 2)
+            if f is not None and _hex(f) != "FFFFFF":
+                etree.SubElement(tcp, qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): _hex(f)})
+            etree.SubElement(tcp, qn("w:vAlign"), {qn("w:val"): "center"})
+            mine = [] if c.get("_cont") else [(r, s, l) for r, s, l in spans
+                                              if rect.contains(fitz.Point(r.x0 + r.width / 2, r.y0 + r.height / 2))]
+            lines_ = {}
+            for r, s, l in mine:
+                lines_.setdefault(round(l["bbox"][1] / 2), []).append((r, s))
+            if not lines_:
+                p = etree.SubElement(tc, qn("w:p"))
+                pp = etree.SubElement(p, qn("w:pPr"))
+                etree.SubElement(pp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "240", qn("w:lineRule"): "auto"})
+                continue
+            for key in sorted(lines_):
+                segs = sorted(lines_[key], key=lambda x: x[0].x0)
+                lx0 = min(r.x0 for r, _ in segs)
+                lx1 = max(r.x1 for r, _ in segs)
+                mid = (lx0 + lx1) / 2 - (rect.x0 + rect.width / 2)
+                jc = "center" if abs(mid) < rect.width * 0.12 else ("left" if mid < 0 else "right")
+                p = etree.SubElement(tc, qn("w:p"))
+                pp = etree.SubElement(p, qn("w:pPr"))
+                etree.SubElement(pp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "240", qn("w:lineRule"): "auto"})
+                if jc == "left":
+                    etree.SubElement(pp, qn("w:ind"), {qn("w:left"): str(max(0, int((lx0 - rect.x0 - 2) * 20 * W_scale)))})
+                etree.SubElement(pp, qn("w:jc"), {qn("w:val"): jc})
+                prev_x1 = None
+                for r, s in segs:
+                    run = etree.SubElement(p, qn("w:r"))
+                    rp = etree.SubElement(run, qn("w:rPr"))
+                    if s["flags"] & 16 or "bold" in s["font"].lower():
+                        etree.SubElement(rp, qn("w:b"))
+                    if s["flags"] & 4 or s.get("text", "") and False:
+                        pass
+                    etree.SubElement(rp, qn("w:color"), {qn("w:val"): "%06X" % s["color"]})
+                    etree.SubElement(rp, qn("w:sz"), {qn("w:val"): str(max(2, int(round(s["size"] * 2 * W_scale))))})
+                    t = etree.SubElement(run, qn("w:t"))
+                    txt = s["text"]
+                    if prev_x1 is not None and r.x0 - prev_x1 > s["size"] * 0.25 and not txt.startswith(" "):
+                        txt = " " + txt
+                    t.text = txt.rstrip() if (r, s) == segs[-1] else txt
+                    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                    prev_x1 = r.x1
+    # 안전장치: 원본 글이 하나라도 빠지면(어느 칸에도 안 들어감) 다시 짜지 않는다(돈암동에서 글이 빠졌다)
+    want = "".join(sp[1]["text"] for sp in spans).replace(" ", "")
+    got = "".join(t.text or "" for t in tbl.iter(qn("w:t"))).replace(" ", "")
+    if len(got) < len(want):
+        return None
+    return tbl
+
+
+def clean_broken_nested_tables(d, grps):
+    """pdf2docx 가 망가뜨린 '표 안의 표'(칸마다 글 한 토막짜리 작은 표가 3개 넘게 박힘)에서 글 없는 진한 칸의 칠을 지운다.
+    ★방배동 금융조건: 원본 머리글의 검정 칠이 빈 칸들로 번져 큰 검은 덩어리가 됐다(2026-10-13). 글이 든 칸 색은 그대로. 고친 칸 수."""
+    from docx.oxml.ns import qn
+    n = 0
+    for el in grps_iter(grps):
+        for t in list(el.iter(qn("w:tbl"))):
+            if not any(a.tag == qn("w:tbl") and not _is_wrapper_tbl(a) for a in t.iterancestors()):
+                continue
+            tcs = [c for c in t.iter(qn("w:tc")) if next((a for a in c.iterancestors() if a.tag == qn("w:tbl")), None) is t]
+            frags = sum(1 for c in tcs for it in c.findall(qn("w:tbl")) if len(list(it.iter(qn("w:tc")))) <= 2)
+            if frags < 3:
+                continue
+            for c in t.iter(qn("w:tc")):
+                shd = c.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+                f = (shd.get(qn("w:fill")) or "") if shd is not None else ""
+                if f and _lum_hex(f) < 0.5 and not "".join(x.text or "" for x in c.iter(qn("w:t"))).strip():
+                    shd.getparent().remove(shd)
+                    n += 1
+    return n
+
+
 def _is_wrapper_tbl(t):
     from docx.oxml.ns import qn
     rows = t.findall(qn("w:tr"))
@@ -1315,7 +1549,14 @@ def fix_broken_nested_tables(d, grps, page):
                 f = (shd.get(qn("w:fill")) or "") if shd is not None else ""
                 if f and _lum_hex(f) < 0.5 and not "".join(x.text or "" for x in c.iter(qn("w:t"))).strip():
                     dark_empty += 1
-            if dark_empty < 5 or not "".join(x.text or "" for x in t.iter(qn("w:t"))).strip():
+            # 칸마다 글 한 토막짜리 작은 표(1~2칸)가 3개 넘게 박힌 것 = pdf2docx 가 망가뜨린 모양(방배동 금융조건)
+            frags = 0
+            for c in tcs:
+                for it in c.findall(qn("w:tbl")):
+                    if len(list(it.iter(qn("w:tc")))) <= 2:
+                        frags += 1
+            deep = frags >= 3
+            if (dark_empty < 5 and not deep) or not "".join(x.text or "" for x in t.iter(qn("w:t"))).strip():
                 continue
             # 맨 바깥(껍데기 아닌) 표의 칸 = 바꿀 자리
             cells = [a for a in t.iterancestors() if a.tag == qn("w:tc")]
@@ -1334,26 +1575,23 @@ def fix_broken_nested_tables(d, grps, page):
                     box |= r
             if box.is_empty or box.width < 30:
                 continue
-            box = (box + (-6, -6, 6, 6)) & page.rect
-            png = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=box).tobytes("png")
-            w_el = outer.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
-            cell_w = int(float(w_el.get(qn("w:w")))) / 20 if w_el is not None and re.fullmatch(r"[\d.]+", w_el.get(qn("w:w")) or "") else box.width
-            wpt = min(box.width, cell_w - 4)
-            inline = d.part.new_pic_inline(io.BytesIO(png), Pt(wpt), Pt(wpt * box.height / box.width))
-            for ch in list(outer):
-                if ch.tag != qn("w:tcPr"):
-                    outer.remove(ch)
-            p = outer.makeelement(qn("w:p"), {})
-            ppr = p.makeelement(qn("w:pPr"), {})
-            ppr.append(ppr.makeelement(qn("w:jc"), {qn("w:val"): "center"}))
-            p.append(ppr)
-            r = p.makeelement(qn("w:r"), {})
-            dr = r.makeelement(qn("w:drawing"), {})
-            dr.append(inline)
-            r.append(dr)
-            p.append(r)
-            outer.append(p)
-            # 칸 줄 높이는 그림에 맞게 '최소'
+            box = (box + (-8, -8, 8, 8)) & page.rect
+            new_tbl = rebuild_table_from_pdf(page, box)
+            if new_tbl is None:
+                continue
+            # 바깥 칸 안에서 망가진 표를 품은 표만 새 표로 바꾼다(그 앞뒤 문단·각주는 그대로)
+            holder = None
+            for ch in outer:
+                if ch.tag == qn("w:tbl") and (ch is t or any(x is t for x in ch.iter(qn("w:tbl")))):
+                    holder = ch
+                    break
+            if holder is None:
+                continue
+            holder.addprevious(new_tbl)
+            outer.remove(holder)
+            if outer[-1].tag != qn("w:p"):
+                outer.append(outer.makeelement(qn("w:p"), {}))     # 칸은 문단으로 끝나야 한다
+            # 칸 줄 높이는 내용에 맞게 '최소'
             tr = next((a for a in outer.iterancestors() if a.tag == qn("w:tr")), None)
             h = tr.find(f"{qn('w:trPr')}/{qn('w:trHeight')}") if tr is not None else None
             if h is not None:
@@ -1748,20 +1986,23 @@ def _fit_page(secs, grps, box):
     # 어림은 표가 빽빽한 쪽에서 크게 넘친다(돈암동 6쪽 573pt → 쪽이 반으로 줄어 표가 쪼그라들고 쪽이 넘쳤다).
     # → 늘어날 몫은 쪽 높이의 GROW_CAP 까지만 반영한다.
     grow = min(grow, box.height * GROW_CAP)
-    s = min(1.0, BOX_W_PT / max(old_w, 1), BOX_H_PT * HEIGHT_SAFETY / max(box.height + grow, 1))
+    # ★가로(표 폭·칸 폭·들여쓰기)는 양식 본문 폭 그대로 두고(넓으면만 줄임), 세로(글자 크기·줄 간격·줄 높이·그림)만 줄여 한 쪽에 맞춘다.
+    #   예전엔 통째로 줄여 표가 머리말·꼬리말 선보다 좁았다(방배동 86~94%, 2026-10-13 사용자 지적).
+    sw = min(1.0, BOX_W_PT / max(old_w, 1))
+    s = min(sw, BOX_H_PT * HEIGHT_SAFETY / max(box.height + grow, 1))
     for i, sec in enumerate(secs):
         _set_geometry(sec, new_page=(i == 0))
         cols = sec._sectPr.find(qn("w:cols"))               # 2단 같은 단 너비·간격도 같은 비율로
-        if cols is not None and s < 0.999:
+        if cols is not None and sw < 0.999:
             for el in [cols] + cols.findall(qn("w:col")):
                 for a in ("space", "w"):
                     v = el.get(qn("w:" + a))
                     if v and v.isdigit():
-                        el.set(qn("w:" + a), str(int(int(v) * s)))
+                        el.set(qn("w:" + a), str(int(int(v) * sw)))
     for grp in grps:
         for el in grp:
-            scale_xml(el, s, old_left)
-            _place_anchors(el, s, old_left, box.y0)
+            scale_xml(el, s, old_left, sw)
+            _place_anchors(el, s, old_left, box.y0, sw)
     _flatten_lead_anchors(grps[0])
     lead = max(0.0, (box.y0 - old_top) * s)                 # 위 띠를 지운 자리 = 쓸데없는 빈 칸
     trim_leading(grps[0], lead)
@@ -1913,20 +2154,21 @@ _EMU = {"extent": ("cx", "cy"), "ext": ("cx", "cy"), "off": ("x", "y"),
         "effectExtent": ("l", "t", "r", "b")}
 
 
-def scale_xml(root, s, old_left=0.0):
-    """root 안의 길이(글자 크기·간격·들여쓰기·표 너비·그림 크기·위치)를 모두 s 배로."""
-    if s >= 0.999:
+def scale_xml(root, s, old_left=0.0, sw=None):
+    """root 안의 길이를 줄인다: 세로·크기(글자·간격·줄 높이·그림)는 s 배, 가로(표·칸 폭·들여쓰기·탭)는 sw 배(없으면 s)."""
+    sw = s if sw is None else sw
+    if s >= 0.999 and sw >= 0.999:
         return
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
     A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 
-    def mul(el, attr, ns=W, minimum=None):
+    def mul(el, attr, ns=W, minimum=None, f=None):
         k = ns + attr if ns else attr
         v = el.get(k)
         if v is None or not v.lstrip("-").isdigit():
             return
-        nv = int(round(int(v) * s))
+        nv = int(round(int(v) * (s if f is None else f)))
         if minimum is not None:
             nv = max(minimum, nv)
         el.set(k, str(nv))
@@ -1951,13 +2193,13 @@ def scale_xml(root, s, old_left=0.0):
                 if name in ("tblW", "tcW") and el.get(W + "type") not in (None, "dxa"):
                     continue
                 for a in _TWIPS[name]:
-                    mul(el, a)
+                    mul(el, a, f=(s if name == "trHeight" else sw))
             elif name == "tblpPr":
                 for a in ("tblpX", "tblpY", "leftFromText", "rightFromText", "topFromText", "bottomFromText"):
-                    mul(el, a)
+                    mul(el, a, f=(sw if a in ("tblpX", "leftFromText", "rightFromText") else s))
             elif name in ("top", "left", "bottom", "right", "start", "end") and \
                     el.getparent() is not None and el.getparent().tag in (W + "tcMar", W + "tblCellMar"):
-                mul(el, "w")
+                mul(el, "w", f=(s if name in ("top", "bottom") else sw))
         elif tag.startswith(WP):
             name = tag[len(WP):]
             if name in _EMU:
@@ -1965,7 +2207,8 @@ def scale_xml(root, s, old_left=0.0):
                     mul(el, a, ns="")
             elif name == "posOffset" and el.text and el.text.lstrip("-").isdigit():
                 if el.getparent().get("relativeFrom") != "page":       # 쪽 기준 위치는 _place_anchors 가 맞춘다
-                    el.text = str(int(int(el.text) * s))
+                    f = sw if el.getparent().tag == WP + "positionH" else s
+                    el.text = str(int(int(el.text) * f))
         elif tag.startswith(A):
             name = tag[len(A):]
             if name in ("ext", "off", "chExt", "chOff") and el.getparent() is not None \
@@ -1974,7 +2217,7 @@ def scale_xml(root, s, old_left=0.0):
                     mul(el, a, ns="")
 
 
-def _place_anchors(root, s, old_left, old_top):
+def _place_anchors(root, s, old_left, old_top, sw=None):
     """쪽 기준으로 박힌 떠 있는 그림·도형 위치를 글과 같은 자리로 옮긴다.
     ★고산 18쪽(2026-10-12 사용자 지적): 글은 양식 여백(위 3cm)으로 내리고 원본 위 빈 자리를 깎았는데
     그림은 원본 쪽 위치(위에서 59.6pt) 그대로라 머리말 위로 올라가고 그림 설명 글과 겹쳤다.
@@ -1988,7 +2231,7 @@ def _place_anchors(root, s, old_left, old_top):
             continue
         v = int(off.text) / 12700
         if pos.tag == WP + "positionH":
-            v = (v - old_left) * s + LEFT_CM / 2.54 * 72
+            v = (v - old_left) * (s if sw is None else sw) + LEFT_CM / 2.54 * 72
         else:
             v = (v - old_top) * s + TOP_CM / 2.54 * 72
         off.text = str(int(max(0.0, v) * 12700))
@@ -2144,3 +2387,45 @@ def _insert_picture_page(d, idx, png, box):
         last.addprevious(p._p)
     _set_geometry(d.sections[idx])
     return h
+
+
+# ──────────────────────────────────────────────
+# 금융 구조도 기본값(원본에서 읽기) — 화면 2단계 칸을 미리 채운다(사람이 고친다)
+# ──────────────────────────────────────────────
+_DIAG_LABELS = [
+    ("차주", re.compile(r"^차\s*주$")),
+    ("신탁", re.compile(r"^(신\s*탁\s*사|신탁기관|신탁회사)$")),
+    ("금액", re.compile(r"^(대출\s*금액|대출\s*규모|대출금|총\s*대출금액)$")),
+    ("LTV", re.compile(r"^LTV$", re.I)),
+    ("금리", re.compile(r"^(대출\s*금리|금\s*리|적용\s*금리)$")),
+    ("연대보증", re.compile(r"^(연대\s*보증(인)?|보증인)$")),
+]
+
+
+def diagram_defaults(pdf_bytes, max_pages=10):
+    """원본 앞쪽 표의 '구분 | 내용' 줄에서 차주·신탁사·대출금액·LTV·금리·연대보증을 읽는다(못 찾으면 빈칸)."""
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    found = {}
+    for page in list(doc)[1:max_pages]:
+        words = page.get_text("words")
+        rows = {}
+        for w in words:
+            rows.setdefault(round((w[1] + w[3]) / 2 / 3), []).append(w)
+        for key in sorted(rows):
+            ws = sorted(rows[key], key=lambda w: w[0])
+            # 맨 앞 1~3 낱말을 붙여 구분 이름인지 본다
+            for k in (1, 2, 3):
+                label = " ".join(w[4] for w in ws[:k])
+                for name, rx in _DIAG_LABELS:
+                    if name in found or not rx.match(label.replace(" ", "") if name != "LTV" else label):
+                        continue
+                    val = " ".join(w[4] for w in ws[k:]).strip(" :·")
+                    heads = len(re.findall(r"대출기간|금리|수수료|LTV|구분|내용|비고", val))
+                    if val and len(val) < 60 and heads < 2:          # 표 머리글 줄('대출기간 금리 수수료 LTV')은 값이 아니다
+                        found[name] = val
+                break
+    if "금리" in found:
+        found["금리"] = re.sub(r"^연\s*", "", found["금리"])
+    return {"차주": found.get("차주", ""), "신탁": found.get("신탁", ""), "연대보증": found.get("연대보증", ""),
+            "본건": {"금액": found.get("금액", ""), "LTV": found.get("LTV", ""), "금리": found.get("금리", ""), "담보": ""},
+            "브릿지": ""}

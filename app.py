@@ -82,7 +82,7 @@ TOOLS = {
 _SHARED_NAMES = ("claude_api", "extractors", "engine_bits", "diagram",
                  "summary_pipeline", "ui_components", "modules",
                  # IM 회사양식(2026-10-07) — 이름이 흔해서 다른 도구와 겹칠 수 있다
-                 "engine", "pages", "pdf_input", "docx_repair")
+                 "engine", "pages", "pdf_input", "docx_repair", "diagram")
 
 
 def open_tool(key: str):

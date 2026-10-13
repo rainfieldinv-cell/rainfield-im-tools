@@ -616,6 +616,119 @@ def strip_cell_trailing_spaces(doc):
     return n
 
 
+FIN_TITLE = "본건 기초자산 금융조건"
+_FIN_TITLE_RE = re.compile(r"(주요\s*)?금융\s*(개요|조건|구조)|금융\s*조건|금\s*융\s*조\s*건")
+
+
+def drop_structure_rows(doc):
+    """원본 표의 '구조도' 줄(구분 칸 글에 '구조도', 그 줄에 그림)을 지운다 — 회사 금융 구조도가 사모사채 개요 아래에
+    따로 들어가므로(2026-10-13 사용자 확정 '구조도 사진 항목 행을 지워서 이어서'). 지운 수."""
+    n = 0
+    for tr in list(doc.element.body.iter(qn("w:tr"))):
+        tcs = tr.findall(qn("w:tc"))
+        if len(tcs) < 2:
+            continue
+        label = "".join(t.text or "" for t in tcs[0].iter(qn("w:t"))).replace(" ", "")
+        if "구조도" not in label or len(label) > 12:
+            continue
+        if tr.find(".//" + qn("w:drawing")) is None and tr.find(".//" + qn("w:pict")) is None:
+            continue
+        nxt = tr.getnext()                                   # 세로로 합친 칸이 이 줄에서 시작하면 다음 줄로 넘긴다
+        for k, tc in enumerate(tcs):
+            vm = tc.find(f"{qn('w:tcPr')}/{qn('w:vMerge')}")
+            if vm is not None and vm.get(qn("w:val")) == "restart" and nxt is not None:
+                ntcs = nxt.findall(qn("w:tc"))
+                if k < len(ntcs):
+                    nvm = ntcs[k].find(f"{qn('w:tcPr')}/{qn('w:vMerge')}")
+                    if nvm is not None:
+                        nvm.set(qn("w:val"), "restart")
+        tbl = tr.getparent()
+        for anc in tr.iterancestors(qn("w:tr")):             # 감싼 바깥 줄의 높이는 지운 줄 몫이 남아 빈 자리가 생긴다 → 풀기
+            h = anc.find(f"{qn('w:trPr')}/{qn('w:trHeight')}")
+            if h is not None:
+                h.getparent().remove(h)
+        tbl.remove(tr)
+        if not tbl.findall(qn("w:tr")):
+            tbl.getparent().remove(tbl)
+        n += 1
+    return n
+
+
+def whiten_borders_to_black(doc):
+    """표 테두리 중 흰색(FFFFFF)만 검정으로(2026-10-13 사용자 확정). 다른 색은 그대로. 바꾼 수."""
+    n = 0
+    for b in doc.element.body.iter(qn("w:tcBorders"), qn("w:tblBorders")):
+        for e in b:
+            col = (e.get(qn("w:color")) or "").lstrip("#").upper()
+            if col == "FFFFFF" and e.get(qn("w:val")) not in ("nil", "none"):
+                e.set(qn("w:color"), "000000")
+                n += 1
+    return n
+
+
+def _set_visible_text(p, text):
+    """글을 '흰 글씨가 아닌' 첫 글 조각에 넣고 나머지 조각은 비운다(돈암동: 첫 조각이 흰 글씨라 제목이 안 보였다)."""
+    runs = [r for r in p.iter(qn("w:r")) if r.find(qn("w:t")) is not None]
+    def white(r):
+        c = r.find(f"{qn('w:rPr')}/{qn('w:color')}")
+        return c is not None and (c.get(qn("w:val")) or "").upper() == "FFFFFF"
+    keep = next((r for r in runs if not white(r)), runs[0] if runs else None)
+    if keep is None:
+        return
+    for r in runs:
+        for t in r.findall(qn("w:t")):
+            t.text = ""
+    t = keep.find(qn("w:t"))
+    t.text = text
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def rename_finance_headings(doc):
+    """원본 대단원 중 금융 관련 제목(금융개요·주요 금융조건·금융 조건…) → '본건 기초자산 금융조건'
+    (2026-10-13 사용자 확정, 번호·모양은 그대로). 번호 상자 표·번호 문단 둘 다. 바꾼 수."""
+    n = 0
+    boxes = False
+    body = doc.element.body
+    for tbl in body.iter(qn("w:tbl")):                        # ① 번호 상자 표
+        if any(a.tag == qn("w:tbl") for a in tbl.iterancestors()):
+            continue
+        rows = tbl.findall(qn("w:tr"))
+        if len(rows) != 1 or len(rows[0].findall(qn("w:tc"))) != 2:
+            continue
+        c0, c1 = rows[0].findall(qn("w:tc"))
+        num = "".join(t.text or "" for t in c0.iter(qn("w:t"))).strip()
+        title = "".join(t.text or "" for t in c1.iter(qn("w:t"))).strip()
+        if _SEC_NO_RE.fullmatch(num or "x") and title:
+            boxes = True                                     # 번호 상자식 대단원이 있는 원본 → 번호 문단(소제목)은 안 건드린다
+        if _SEC_NO_RE.fullmatch(num or "x") and title and len(title) <= 20 and _FIN_TITLE_RE.search(title):
+            p = next(pp for pp in c1.iter(qn("w:p")) if "".join(t.text or "" for t in pp.iter(qn("w:t"))).strip())
+            _set_visible_text(p, FIN_TITLE)
+            n += 1
+    if boxes:
+        return n
+    found = []                                              # ② 번호 문단(가장 큰 글자 무리 = 대단원)
+    for p in body.findall(qn("w:p")):
+        txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if not txt.strip() or len(txt.strip()) > 30:
+            continue
+        for kind, rx in _HEAD_PATTERNS:
+            m = rx.match(txt)
+            if m and m.group(2) and _num_value(kind, m.group(2)):
+                szs = [int(x.get(qn("w:val"))) for x in p.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()]
+                found.append((max(szs) if szs else 20, kind, p, m))
+                break
+    if found:
+        top = max(f[0] for f in found)
+        for sz, kind, p, m in found:
+            if sz >= top - 1 and _FIN_TITLE_RE.search(m.group(4)):
+                _set_par_text(p, m.group(1) + m.group(2) + m.group(3) + FIN_TITLE)
+                ind = p.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+                if ind is not None:                          # 원본 오른쪽 들여쓰기가 좁아 두 줄로 꺾였다(내곡동)
+                    ind.set(qn("w:right"), "0")
+                n += 1
+    return n
+
+
 def center_cells_vertically(doc):
     """모든 표 칸의 글을 세로 가운데로(가로는 원본 그대로). 2026-10-12 사용자 확정 '표 글은 무조건 셀 가운데'.
     pdf2docx 는 칸 안 위치를 문단 '앞 간격' 으로 맞춰 두므로, 그 간격(첫 문단 앞)을 없애야 진짜 가운데가 된다."""
@@ -1336,6 +1449,106 @@ def _build_contact_section(doc, contacts):
     return [e for e in body if not any(e is b for b in before) and e.tag != qn("w:sectPr")]
 
 
+def _copy_from_template(tpl, doc, el):
+    """양식 요소 사본 — 그림·하이퍼링크 연결과 서식까지 이 문서로 옮긴다."""
+    new = copy.deepcopy(el)
+    rels = tpl.part.rels
+    for node in new.iter():
+        for attr in (R_EMBED, R_ID):
+            rid = node.get(attr)
+            if not rid or rid not in rels:
+                continue
+            rel = rels[rid]
+            if rel.reltype == RT.IMAGE:
+                nid, _ = doc.part.get_or_add_image(io.BytesIO(rel.target_part.blob))
+                node.set(attr, nid)
+            elif rel.reltype == RT.HYPERLINK:
+                node.set(attr, doc.part.relate_to(rel.target_ref, RT.HYPERLINK, is_external=True))
+    _import_styles(tpl, doc, new)
+    _pin_template_defaults(doc, new)
+    return new
+
+
+def _tpl_body(tpl):
+    return [el for el in tpl.element.body if el.tag != qn("w:sectPr")]
+
+
+def read_bond_defaults(tpl_path=None):
+    """양식 사모사채 개요 표의 기본 글(화면 2단계 기본값). {구분: 내용}"""
+    tpl = docx.Document(tpl_path or template_path())
+    for t in tpl.tables:
+        rows = t.rows
+        if rows and rows[0].cells[0].text.strip() == "사모사채명":
+            return {(r.cells[0].text.strip().replace("사채 유형", "사채유형")): r.cells[-1].text.strip() for r in rows}
+    return {}
+
+
+def _template_bond_els(tpl, doc, bond, diagram_png=None):
+    """양식의 [사모사채 개요 표][빈 줄][금융 구조도 제목] 을 복사하고, 표 내용은 입력값(없으면 양식 글), 제목 아래 구조도 그림."""
+    els = _tpl_body(tpl)
+    ti = next((i for i, el in enumerate(els) if el.tag == qn("w:tbl")
+               and "사모사채명" in "".join(t.text or "" for t in el.iter(qn("w:t")))), None)
+    if ti is None:
+        return None
+    out = []
+    tbl = _copy_from_template(tpl, doc, els[ti])
+    for tr in tbl.findall(qn("w:tr")):
+        tcs = tr.findall(qn("w:tc"))
+        if len(tcs) < 2:
+            continue
+        key = "".join(t.text or "" for t in tcs[0].iter(qn("w:t"))).strip().replace("사채 유형", "사채유형")
+        val = (bond or {}).get(key, "").strip()
+        if val:
+            p = tcs[-1].find(qn("w:p"))
+            if p.find(".//" + qn("w:t")) is None:
+                r = etree.SubElement(p, qn("w:r"))
+                etree.SubElement(r, qn("w:t"))
+            _set_par_text(p, val)
+            for extra in tcs[-1].findall(qn("w:p"))[1:]:
+                tcs[-1].remove(extra)
+    out.append(tbl)
+    hi = next((i for i in range(ti + 1, len(els)) if "구조도" in "".join(t.text or "" for t in els[i].iter(qn("w:t")))), None)
+    if hi is not None:
+        for el in els[ti + 1:hi + 1]:
+            c = _copy_from_template(tpl, doc, el)
+            for br in list(c.iter(qn("w:br"))):          # 제목 뒤 쪽나눔은 뺀다(구조도 그림이 그 아래로 와야 한다)
+                if br.get(qn("w:type")) == "page":
+                    br.getparent().remove(br)
+            out.append(c)
+        if diagram_png:
+            from docx.shared import Cm
+            from docx.shared import Cm
+            inline = doc.part.new_pic_inline(io.BytesIO(diagram_png), Cm(16.0), None)   # 양식 본문 폭
+            p = etree.Element(qn("w:p"))
+            ppr = etree.SubElement(p, qn("w:pPr"))
+            etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "120", qn("w:after"): "0"})
+            etree.SubElement(ppr, qn("w:jc"), {qn("w:val"): "center"})
+            r = etree.SubElement(p, qn("w:r"))
+            dr = etree.SubElement(r, qn("w:drawing"))
+            dr.append(inline)
+            out.append(p)
+    return out
+
+
+def _template_contact_els(tpl, doc):
+    """양식 연락처 부분('본 자료와 관련하여…' 부터 '끝' 까지) 그대로."""
+    els = _tpl_body(tpl)
+    si = next((i for i, el in enumerate(els) if "본 자료와 관련하여" in "".join(t.text or "" for t in el.iter(qn("w:t")))), None)
+    if si is None:
+        return None
+    # 앞쪽 빈 문단(구조도 제목 뒤 여백)부터가 아니라 안내문부터
+    out = [_copy_from_template(tpl, doc, el) for el in els[si:]]
+    WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+    A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    for el in out:                                           # 글상자는 글에 맞춰 늘어나게(담당자 셋째 줄이 잘렸다)
+        for bp in el.iter("{%s}bodyPr" % WPS):
+            for ch in list(bp):
+                if etree.QName(ch).localname in ("noAutofit", "normAutofit", "spAutoFit"):
+                    bp.remove(ch)
+            bp.append(etree.Element("{%s}spAutoFit" % A))
+    return out
+
+
 def read_contacts(tpl):
     """양식 마지막 쪽 연락처 표에서 담당자 목록을 읽는다(빈 칸은 건너뜀)."""
     for t in tpl.tables:
@@ -1532,7 +1745,8 @@ def _place_bond(doc, tpl, bond_els, place):
             sp.addprevious(el)
 
 
-def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_place=None, tpl_path=None):
+def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_place=None, tpl_path=None,
+          diagram_png=None):
     """(PDF 에서 만든) 본문 워드 bytes → 회사양식 워드 bytes, 보고(dict).
 
     본문은 pdf_input.convert 가 이미 회사 규격(A4·여백)으로 맞춰 둔 것이다.
@@ -1561,6 +1775,12 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     bond_els = _build_bond_section(doc, bond)
     for el in bond_els:
         body.remove(el)
+    rep["금융 대단원 제목 바꿈"] = rename_finance_headings(doc)   # 개요 제목(원본 첫 대단원 복사)을 만든 뒤에
+    rep["흰 테두리 검정"] = whiten_borders_to_black(doc)
+    rep["원본 구조도 줄 지움"] = drop_structure_rows(doc)
+    tpl_bond = _template_bond_els(tpl, doc, bond, diagram_png)   # 2026-10-13 양식(최종): 기본 글 든 표 + 금융 구조도
+    if tpl_bond:
+        bond_els = bond_els[:1] + tpl_bond
     # 제목은 원본 대단원 모양 그대로(2026-10-13) — 'Ⅰ.' 같은 번호를 도구가 정하지 않는다
     if head is not None:
         if head.tag == qn("w:p"):
@@ -1595,10 +1815,15 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     ppr.append(copy.deepcopy(old_last))
     body.insert(list(body).index(old_last), holder)          # 원본 마지막 구역을 문단 구역나눔으로
     body.replace(old_last, _sect_from_template(tpl, title_page=False))
-    contacts = read_contacts(tpl)
-    for el in _build_contact_section(doc, contacts):
-        body.remove(el)
-        body.insert(list(body).index(body.find(qn("w:sectPr"))), el)
+    tail = _template_contact_els(tpl, doc)
+    if tail:
+        for el in tail:
+            body.insert(list(body).index(body.find(qn("w:sectPr"))), el)
+    else:
+        contacts = read_contacts(tpl)
+        for el in _build_contact_section(doc, contacts):
+            body.remove(el)
+            body.insert(list(body).index(body.find(qn("w:sectPr"))), el)
 
     # ── 맨 앞: 회사 표지(혼자 한 쪽) ──
     _merge_nsmap(doc, tpl)
@@ -1609,8 +1834,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
         if br.get(qn("w:type")) == "page":
             br.getparent().remove(br)
     # 회사 Investment Highlight 쪽(양식 그대로) — 표지 바로 다음, 그 뒤에 사모사채 개요(새 쪽)
-    hl = _highlight_elements(tpl, doc)
-    rep["회사 하이라이트 쪽"] = bool(hl)
+    hl = []                                                 # 2026-10-13 양식에서 회사 하이라이트 쪽 뺌 — 원본 하이라이트를 쓴다
     for i, el in enumerate(cover + [_holder(_sect_from_template(tpl, title_page=True))] + hl):
         body.insert(i, el)
 
