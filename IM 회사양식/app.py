@@ -83,12 +83,6 @@ def _field(label, store, default="", help=None):
     return val
 
 
-def _diagram_fin():
-    g = lambda k: (SS.get(f"cf_dg_{k}") or "").strip()
-    return {"차주": g("차주"), "신탁": g("신탁"), "연대보증": g("연대보증"), "브릿지": g("브릿지"),
-            "본건": {"금액": g("금액"), "LTV": g("LTV"), "금리": g("금리"), "담보": g("담보")}}
-
-
 def _prepare(name, data):
     """원본에서 표지 제목·사진·하이라이트 쪽·끝쪽을 뽑아 보관한다(올릴 때 한 번)."""
     import fitz
@@ -120,10 +114,14 @@ def _prepare(name, data):
     dg = pdf_input.diagram_defaults(data)                    # 금융 구조도 칸: 원본에서 읽은 값(못 읽으면 빈칸)
     for key, val in (("차주", dg["차주"]), ("신탁", dg["신탁"]), ("금액", dg["본건"]["금액"]),
                      ("LTV", dg["본건"]["LTV"]), ("금리", dg["본건"]["금리"]), ("담보", ""),
-                     ("연대보증", dg["연대보증"]), ("브릿지", "")):
+                     ("연대보증", dg["연대보증"]), ("브릿지", ""), ("시공사", dg.get("시공사", ""))):
         SS[f"cf_dg_{key}"] = val
         SS.pop(f"w_cf_dg_{key}", None)
-    for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages"):
+    for k in list(SS.keys()):                                # 전 원본의 구조도 고른 것·채운 값은 버린다
+        if str(k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
+            SS.pop(k, None)
+    for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages",
+              "cf_dg_no", "cf_diag_png", "cf_diag_pptx", "cf_diag_err"):
         SS.pop(k, None)
 
 
@@ -337,27 +335,138 @@ elif step == 3:
 # ══════════════════════════════════════════════════
 elif step == 4:
     st.markdown("### 4단계 · 금융 구조도")
+    st.caption("사모사채 개요 바로 아래에 들어가는 **회사 금융 구조도** 를 만드는 단계입니다. 'IM 요약본' 도구와 똑같이, "
+               "회사에서 쓰던 구조도 틀 중 비슷한 것을 고르고 회사 이름·금액만 채우면 됩니다. "
+               "원본에 있던 구조도 그림 줄은 결과에서 지웁니다. **구조도가 필요 없으면 건너뛰어도 됩니다**"
+               "(그러면 '금융 구조도' 제목도 넣지 않습니다).")
     if not SS.get("cf_info"):
         st.warning("먼저 1단계에서 원본을 올려 주세요.")
     else:
-        st.caption("사모사채 개요 바로 아래에 들어가는 회사 구조도입니다(기존 IM 도구와 같은 모양). "
-                   "원본에서 읽을 수 있는 값은 미리 채워 두었으니 확인하고 고쳐 주세요. 비운 칸은 기본 글"
-                   "('차주', '부동산담보신탁(신탁사)')로 들어가고, 연대보증·브릿지 대출은 비우면 그 상자가 빠집니다. "
-                   "원본에 있던 구조도 그림 줄은 결과에서 지웁니다.")
-        DG = [("차주", "차주 (회사 이름)"), ("신탁", "신탁사"), ("금액", "본건 대출금액 (예: [45]억원)"),
-              ("LTV", "LTV (예: 38.3%)"), ("금리", "금리 (예: [T.B.D]%)"), ("담보", "담보 (예: 연립주택 8세대 1순위 담보신탁)"),
-              ("연대보증", "연대보증 (없으면 비움)"), ("브릿지", "브릿지 대출 (없으면 비움)")]
-        g1, g2 = st.columns(2)
-        for i, (key, label) in enumerate(DG):
-            with (g1 if i % 2 == 0 else g2):
-                SS.setdefault(f"cf_dg_{key}", "")
-                SS[f"cf_dg_{key}"] = st.text_input(label, value=SS[f"cf_dg_{key}"], key=f"w_cf_dg_{key}")
+        import diagram_tpl as _dt
         try:
-            import diagram
-            st.image(diagram.render_png(_diagram_fin()), caption="미리보기", use_container_width=True)
+            _LAYOUTS = _dt.layouts()
         except Exception as e:
-            st.caption(f"(미리보기를 그리지 못했습니다: {e})")
+            _LAYOUTS = []
+            st.error(f"구조도 틀을 읽지 못했습니다 — {e}")
 
+        # ── ① 어떤 구조도를 쓸지 고르기 ─────────────
+        st.markdown("#### ① 비슷한 구조도를 고르세요")
+        st.caption("그림을 보고 이 딜과 가장 비슷한 것을 고르면 됩니다. 완전히 같지 않아도 됩니다 — "
+                   "다음에서 항목을 고치고 뺄 수 있어요.")
+        _tags = _dt.tags()
+        _kinds = ["전체"] + sorted({t for v in _tags.values() for t in v})
+        _pick_kind = st.radio("종류로 걸러보기", _kinds, horizontal=True, key="w_cf_dg_kind",
+                              help="분류가 애매한 구조도는 어느 것을 고르든 항상 보입니다.")
+        _shown = [d for d in _LAYOUTS
+                  if _pick_kind == "전체" or not _tags.get(d["no"]) or _pick_kind in _tags.get(d["no"], [])]
+        _cur = SS.get("cf_dg_no")
+        _cols = st.columns(3)
+        for _i, _d in enumerate(_shown):
+            with _cols[_i % 3]:
+                _tp = _dt.thumb(_d["no"])
+                if _tp:
+                    st.image(_tp, use_container_width=True)
+                if st.button(("✅ " if _cur == _d["no"] else "") + _d["title"], key=f"w_cf_dg_pick_{_d['no']}",
+                             use_container_width=True, help="이 구조도로 만들기"):
+                    SS["cf_dg_no"] = _d["no"]
+                    for _k in list(SS.keys()):
+                        if str(_k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
+                            SS.pop(_k, None)
+                    for _k in ("cf_diag_png", "cf_diag_pptx", "cf_diag_err"):
+                        SS.pop(_k, None)
+                    st.rerun()
+
+        # ── ② 항목 채우기 ───────────────────────────
+        _no = SS.get("cf_dg_no")
+        _d = next((x for x in _LAYOUTS if x["no"] == _no), None) if _no else None
+        if not _d:
+            st.info("위에서 구조도를 하나 고르면 채울 항목이 나옵니다. 구조도가 필요 없으면 그냥 다음 단계로 넘어가세요.")
+        else:
+            st.markdown("---")
+            st.markdown(f"#### ② 항목 채우기 — {_d['title']}")
+            st.caption("원본에서 찾은 값으로 미리 채워두었습니다. **틀린 것만 고치면 됩니다.** "
+                       "이 딜에 없는 항목은 오른쪽 **빼기** 를 체크하세요(그림에서 상자째 사라집니다). "
+                       "비워두고 넘어가도 됩니다.")
+
+            def _g(k):
+                return (SS.get(f"cf_dg_{k}") or "").strip()
+            _auto = _dt.autofill(_d, {"차주": _g("차주"), "시공사": _g("시공사"), "신탁사": _g("신탁"),
+                                      "연대보증": _g("연대보증")}, [_g("금액")])
+            if _auto:
+                st.success(f"원본에서 {len(_auto)}개 항목을 찾아 미리 채웠습니다. 확인·수정하세요.")
+            _ic, _fc = st.columns([1.1, 1])
+            with _ic:
+                _tp = _dt.thumb(_no)
+                if _tp:
+                    st.image(_tp, use_container_width=True,
+                             caption="번호는 아래 입력칸을 찾기 쉬우라고 붙인 것입니다. 완성된 구조도에는 나오지 않습니다.")
+            with _fc:
+                _box = st.container(height=680, border=False)
+            with _box:
+                for _f in _d["fields"]:
+                    _k = _f["key"]
+                    _vk, _xk = f"cf_dv_{_no}_{_k}", f"cf_dx_{_no}_{_k}"
+                    SS.setdefault(_vk, _auto.get(_k, _f["text"]))
+                    SS.setdefault(_xk, False)
+                    _c1, _c2 = st.columns([5, 1])
+                    _name = f"{_f['kind']} {_f['mark']}" if _f["mark"] else _f["kind"]
+                    SS[_vk] = _c1.text_input(_name, value=SS[_vk], key="w_" + _vk, disabled=SS[_xk],
+                                             help=f"틀에 적혀 있던 글 : {_f['text'][:60]}")
+                    _c2.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                    SS[_xk] = _c2.checkbox("빼기", value=SS[_xk], key="w_" + _xk,
+                                           help="이 항목을 그림에서 아예 없앱니다")
+
+            st.markdown("---")
+            st.markdown("#### ③ 구조도 만들기")
+            _vals = {f["key"]: SS.get(f"cf_dv_{_no}_{f['key']}", "") for f in _d["fields"]}
+            _rm = {f["key"] for f in _d["fields"] if SS.get(f"cf_dx_{_no}_{f['key']}")}
+            _b1, _b2 = st.columns(2)
+            if _b1.button("미리보기 만들기 (이대로 쓰기)", type="primary", use_container_width=True,
+                          help="지금 채운 내용으로 구조도를 만들어 아래에 그림으로 보여줍니다. 이 그림이 워드에 들어갑니다."):
+                with st.spinner("구조도를 만드는 중… (10초쯤 걸립니다)"):
+                    try:
+                        _pp, _png, _err = _dt.build(_no, _vals, _rm)
+                        SS["cf_diag_pptx"], SS["cf_diag_png"], SS["cf_diag_err"] = _pp, _png, _err
+                    except Exception as e:
+                        SS["cf_diag_err"] = str(e)
+                st.rerun()
+            if SS.get("cf_diag_pptx"):
+                _b2.download_button("PPT로 내려받아 직접 고치기", data=SS["cf_diag_pptx"],
+                                    file_name=f"금융구조도_{_d['title']}.pptx",
+                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                    use_container_width=True,
+                                    help="파워포인트에서 자유롭게 고칠 수 있습니다. 고친 뒤 아래에 다시 올려주세요.")
+            else:
+                _b2.button("PPT로 내려받아 직접 고치기", use_container_width=True, disabled=True,
+                           help="먼저 왼쪽 '이대로 쓰기' 를 눌러 구조도를 만들어 주세요.")
+            st.markdown("##### 미리보기 — 완성된 구조도")
+            if SS.get("cf_diag_err"):
+                st.warning(f"미리보기를 만들지 못했습니다 — {SS['cf_diag_err']}")
+            if SS.get("cf_diag_png"):
+                st.image(SS["cf_diag_png"], use_container_width=True,
+                         caption="이 모습 그대로 사모사채 개요 아래 '금융 구조도' 에 들어갑니다.")
+            elif not SS.get("cf_diag_err"):
+                st.info("위 **'미리보기 만들기'** 를 누르면 완성된 구조도가 여기에 그림으로 보입니다. (10초쯤 걸립니다)")
+
+            # ── ④ 직접 고친 것 올리기 ────────────────
+            with st.expander("직접 고친 구조도 올리기 (선택)"):
+                st.caption("위에서 내려받은 PPT를 파워포인트에서 고쳤다면 여기에 올려주세요.\n\n"
+                           "· **PPT 파일** 로 올리면 그 구조도를 그림으로 바꿔 넣습니다.\n"
+                           "· 이미지로 주고 싶다면, 파워포인트에서 구조도를 선택하고 **우클릭 → 그림으로 저장** 한 뒤 "
+                           "그 파일을 올리세요.")
+                _up = st.file_uploader("고친 구조도 (PPTX 또는 이미지)", type=["pptx", "png", "jpg", "jpeg"],
+                                       key="w_cf_diag_up")
+                if _up is not None:
+                    if _up.name.lower().endswith(".pptx"):
+                        _png, _err = _dt.pptx_to_png(_up.getvalue())
+                        SS["cf_diag_pptx"], SS["cf_diag_png"], SS["cf_diag_err"] = _up.getvalue(), _png, _err
+                        st.success("고친 PPT를 받았습니다. 이걸로 넣습니다.")
+                    else:
+                        SS["cf_diag_png"], SS["cf_diag_err"] = _up.getvalue(), None
+                        st.success("이미지를 받았습니다. 이걸로 넣습니다.")
+
+        st.success("구조도 준비됨 — 사모사채 개요 아래에 들어갑니다." if SS.get("cf_diag_png") else
+                   "아직 구조도를 만들지 않았습니다. 필요 없으면 그냥 넘어가세요.")
 
     st.markdown("---")
     p1, _sp, p3 = st.columns([2, 4, 2])
@@ -468,7 +577,7 @@ elif step == 5:
                 out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
                                          header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
                                          photo=photo, bond=bond, bond_place=place,
-                                         diagram_png=__import__("diagram").render_png(_diagram_fin()))
+                                         diagram_png=SS.get("cf_diag_png"))
                 bar.empty()
                 SS["cf_out"] = out
                 SS["cf_rep"] = {**rep1, **rep2}

@@ -2395,6 +2395,7 @@ def _insert_picture_page(d, idx, png, box):
 _DIAG_LABELS = [
     ("차주", re.compile(r"^차\s*주$")),
     ("신탁", re.compile(r"^(신\s*탁\s*사|신탁기관|신탁회사)$")),
+    ("시공사", re.compile(r"^(시\s*공\s*사|시공회사)$")),
     ("금액", re.compile(r"^(대출\s*금액|대출\s*규모|대출금|총\s*대출금액)$")),
     ("LTV", re.compile(r"^LTV$", re.I)),
     ("금리", re.compile(r"^(대출\s*금리|금\s*리|적용\s*금리)$")),
@@ -2427,5 +2428,6 @@ def diagram_defaults(pdf_bytes, max_pages=10):
     if "금리" in found:
         found["금리"] = re.sub(r"^연\s*", "", found["금리"])
     return {"차주": found.get("차주", ""), "신탁": found.get("신탁", ""), "연대보증": found.get("연대보증", ""),
+            "시공사": found.get("시공사", ""),
             "본건": {"금액": found.get("금액", ""), "LTV": found.get("LTV", ""), "금리": found.get("금리", ""), "담보": ""},
             "브릿지": ""}

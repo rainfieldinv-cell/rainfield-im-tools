@@ -601,7 +601,7 @@ def _set_cell_text(tc, text):
     if p.find(".//" + qn("w:t")) is None:
         r = etree.SubElement(p, qn("w:r"))
         etree.SubElement(r, qn("w:t"))
-    _set_par_text(p, text)
+    _set_visible_text(p, text)                               # 첫 글 조각이 흰 글씨면 제목이 안 보였다(이천 '0 사모사채 개요')
 
 
 def strip_cell_trailing_spaces(doc):
@@ -1508,7 +1508,7 @@ def _template_bond_els(tpl, doc, bond, diagram_png=None):
                 tcs[-1].remove(extra)
     out.append(tbl)
     hi = next((i for i in range(ti + 1, len(els)) if "구조도" in "".join(t.text or "" for t in els[i].iter(qn("w:t")))), None)
-    if hi is not None:
+    if hi is not None and diagram_png:                       # 구조도를 안 만들었으면 '금융 구조도' 제목도 안 넣는다
         for el in els[ti + 1:hi + 1]:
             c = _copy_from_template(tpl, doc, el)
             for br in list(c.iter(qn("w:br"))):          # 제목 뒤 쪽나눔은 뺀다(구조도 그림이 그 아래로 와야 한다)
