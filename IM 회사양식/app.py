@@ -21,7 +21,7 @@ import re
 import streamlit as st
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STEP_NAMES = ["원본 올리기", "표지·사모사채 개요", "만들기"]
+STEP_NAMES = ["원본 올리기", "표지", "사모사채 개요", "금융 구조도", "만들기"]
 BOND_ROWS = ["사모사채명", "사채유형", "발행인", "기초자산", "발행금액",
              "발행일", "만기일", "금융조건", "이자지급주기"]
 PHOTO_COLS = 6          # 사진 고르기 — 한 줄에 몇 장(원본 사진 전부를 한 화면에 펼친다)
@@ -241,10 +241,10 @@ if step == 1:
 
 
 # ══════════════════════════════════════════════════
-# 2단계 — 표지 · 사모사채 개요
+# 2단계 — 표지
 # ══════════════════════════════════════════════════
 elif step == 2:
-    st.markdown("### 2단계 · 표지 · 사모사채 개요")
+    st.markdown("### 2단계 · 표지")
     if not SS.get("cf_info"):
         st.warning("먼저 1단계에서 원본을 올려 주세요.")
     else:
@@ -294,8 +294,23 @@ elif step == 2:
             if SS.get("cf_photo_pick") == -2 and SS.get("cf_photo_custom"):
                 st.image(SS["cf_photo_custom"], caption="✅ 직접 올린 사진을 씁니다", width=260)
 
-        st.markdown("---")
-        st.markdown("#### 사모사채 개요")
+
+    st.markdown("---")
+    p1, _sp, p3 = st.columns([2, 4, 2])
+    if p1.button("← 이전 단계", use_container_width=True, key="w_cf_prev_1"):
+        _goto(1)
+    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True, key="w_cf_next_3"):
+        _goto(3)
+
+
+# ══════════════════════════════════════════════════
+# 3단계 — 사모사채 개요
+# ══════════════════════════════════════════════════
+elif step == 3:
+    st.markdown("### 3단계 · 사모사채 개요")
+    if not SS.get("cf_info"):
+        st.warning("먼저 1단계에서 원본을 올려 주세요.")
+    else:
         st.caption("왼쪽 구분은 항상 같고, 오른쪽 내용만 이번 딜에 맞게 고쳐 주세요. 처음엔 회사 양식의 기본 글"
                    "(TBD·[000] 등)이 들어 있습니다. 제목의 번호와 모양은 원본 대단원과 같게 자동으로 맞춥니다. "
                    "원본 하이라이트(Executive Summary 등) 바로 뒤에 들어갑니다.")
@@ -308,8 +323,23 @@ elif step == 2:
                 SS[f"cf_bond_{row}"] = st.text_input(row, value=SS[f"cf_bond_{row}"],
                                                      key=f"w_cf_bond_{row}", label_visibility="collapsed")
 
-        st.markdown("---")
-        st.markdown("#### 금융 구조도")
+
+    st.markdown("---")
+    p1, _sp, p3 = st.columns([2, 4, 2])
+    if p1.button("← 이전 단계", use_container_width=True, key="w_cf_prev_2"):
+        _goto(2)
+    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True, key="w_cf_next_4"):
+        _goto(4)
+
+
+# ══════════════════════════════════════════════════
+# 4단계 — 금융 구조도
+# ══════════════════════════════════════════════════
+elif step == 4:
+    st.markdown("### 4단계 · 금융 구조도")
+    if not SS.get("cf_info"):
+        st.warning("먼저 1단계에서 원본을 올려 주세요.")
+    else:
         st.caption("사모사채 개요 바로 아래에 들어가는 회사 구조도입니다(기존 IM 도구와 같은 모양). "
                    "원본에서 읽을 수 있는 값은 미리 채워 두었으니 확인하고 고쳐 주세요. 비운 칸은 기본 글"
                    "('차주', '부동산담보신탁(신탁사)')로 들어가고, 연대보증·브릿지 대출은 비우면 그 상자가 빠집니다. "
@@ -328,19 +358,20 @@ elif step == 2:
         except Exception as e:
             st.caption(f"(미리보기를 그리지 못했습니다: {e})")
 
+
     st.markdown("---")
     p1, _sp, p3 = st.columns([2, 4, 2])
-    if p1.button("← 이전 단계", use_container_width=True):
-        _goto(1)
-    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True):
+    if p1.button("← 이전 단계", use_container_width=True, key="w_cf_prev_3"):
         _goto(3)
+    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True, key="w_cf_next_5"):
+        _goto(5)
 
 
 # ══════════════════════════════════════════════════
-# 3단계 — 만들기
+# 5단계 — 만들기
 # ══════════════════════════════════════════════════
-elif step == 3:
-    st.markdown("### 3단계 · 만들기")
+elif step == 5:
+    st.markdown("### 5단계 · 만들기")
     info = SS.get("cf_info")
     if not SS.get("cf_bytes") or not info:
         st.warning("먼저 1단계에서 원본을 올려 주세요.")
@@ -489,5 +520,5 @@ elif step == 3:
 
     st.markdown("---")
     p1, _sp, _p3 = st.columns([2, 4, 2])
-    if p1.button("← 이전 단계", use_container_width=True):
-        _goto(2)
+    if p1.button("← 이전 단계", use_container_width=True, key="w_cf_prev_4"):
+        _goto(4)
