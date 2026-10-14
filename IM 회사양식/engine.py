@@ -362,9 +362,25 @@ def restyle_section_headings(doc):
         _put(tcpr, tcpr.makeelement(qn("w:vAlign"), {qn("w:val"): "center"}))
         b = tcpr.find(qn("w:tcBorders"))
         if b is not None:
-            for e in b:
-                if e.get(qn("w:val")) not in (None, "nil", "none"):
-                    e.set(qn("w:color"), NAVY)
+            # ★테두리(원본 노란 밑줄 → 네이비)는 칠과 사이에 흰 틈이 생겨 흰 줄로 보였다(2026-10-14) → 테두리 없이 칠만
+            for e in list(b):
+                b.remove(e)
+            for side in ("top", "left", "bottom", "right"):
+                b.append(b.makeelement(qn("w:" + side), {qn("w:val"): "nil"}))
+        # 정사각: 줄 높이 = 번호 칸 폭(사용자: '네모로')
+        w = tcpr.find(qn("w:tcW"))
+        if w is not None and re.fullmatch(r"[\d.]+", w.get(qn("w:w")) or ""):
+            side = int(float(w.get(qn("w:w"))))
+            trpr = row.find(qn("w:trPr"))
+            if trpr is None:
+                trpr = row.makeelement(qn("w:trPr"), {})
+                row.insert(0, trpr)
+            h = trpr.find(qn("w:trHeight"))
+            if h is None:
+                h = trpr.makeelement(qn("w:trHeight"), {})
+                trpr.append(h)
+            h.set(qn("w:val"), str(side))
+            h.set(qn("w:hRule"), "exact")
         for tr in thin:                                       # 밑줄용 얇은 줄도 뺀다
             tbl.remove(tr)
         b = cells[1].find(f"{qn('w:tcPr')}/{qn('w:tcBorders')}")   # 제목 칸 밑줄·옆줄 빼기
@@ -1203,6 +1219,16 @@ def _import_numbering(tpl, doc, root):
             n.set(qn("w:val"), remap[n.get(qn("w:val"))])
 
 
+def _is_cover_photo(node):
+    """그 그림이 표지 사진 자리(가장 큰 그림, 높이 3cm 넘음)인가."""
+    WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+    a = node
+    while a is not None and etree.QName(a).localname not in ("anchor", "inline"):
+        a = a.getparent()
+    ext = a.find(WP + "extent") if a is not None else None
+    return ext is not None and int(ext.get("cy", "0")) > 3 * 360000
+
+
 def _cover_elements(tpl, doc, title_lines, date_text, photo):
     """양식 표지(문단 0·1)를 복사해 글·사진을 바꿔 돌려준다."""
     tb = _blocks(tpl.element.body)
@@ -1231,6 +1257,12 @@ def _cover_elements(tpl, doc, title_lines, date_text, photo):
             for attr in (R_EMBED, R_ID):
                 rid = node.get(attr)
                 if not rid or rid not in tpl_rels or tpl_rels[rid].reltype != RT.IMAGE:
+                    continue
+                if not _is_cover_photo(node):
+                    # 표지 사진이 아닌 그림(맨 위 로고 띠 '그림 16' 등)은 양식 그림 그대로
+                    # ★예전엔 모든 그림을 표지 사진으로 바꿔 로고 자리에 작은 사진이 생겼다(2026-10-14 사용자 지적)
+                    nid, _ = doc.part.get_or_add_image(io.BytesIO(tpl_rels[rid].target_part.blob))
+                    node.set(attr, nid)
                     continue
                 if photo is None:
                     box = node
@@ -1483,7 +1515,66 @@ def read_bond_defaults(tpl_path=None):
     return {}
 
 
-def _template_bond_els(tpl, doc, bond, diagram_png=None):
+def _sub_heading_from_original(doc):
+    """원본 '대단원 아래 소제목' 문단(예: '1. 본건 대출 금융조건', '(1) …') — 가장 큰 번호 문단 무리 다음 크기 무리의 첫 문단.
+    번호 상자식 대단원이 있으면 번호 문단 중 가장 큰 무리가 소제목이다. (문단, 종류, 매치) 또는 None."""
+    body = doc.element.body
+    boxes = False
+    for tbl in body.findall(qn("w:tbl")):
+        row, _ = _heading_row(tbl)
+        if row is not None and len(row.findall(qn("w:tc"))) == 2:
+            num = "".join(t.text or "" for t in row.findall(qn("w:tc"))[0].iter(qn("w:t"))).strip()
+            if _SEC_NO_RE.fullmatch(num or "x"):
+                boxes = True
+                break
+    found = []
+    for p in body.findall(qn("w:p")):
+        txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
+        if not txt.strip() or len(txt.strip()) > 40:
+            continue
+        for kind, rx in _HEAD_PATTERNS:
+            m = rx.match(txt)
+            if m and m.group(2) and _num_value(kind, m.group(2)):
+                szs = [int(x.get(qn("w:val"))) for x in p.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()]
+                found.append((max(szs) if szs else 20, kind, p, m))
+                break
+    if not found:
+        return None
+    sizes = sorted({f[0] for f in found}, reverse=True)
+    if not boxes and len(sizes) > 1:
+        sizes = sizes[1:]                                    # 가장 큰 무리는 대단원
+    top = sizes[0]
+    return next(((p, kind, m) for sz, kind, p, m in found if sz == top), None)
+
+
+def _make_sub_heading(src, n, title):
+    """원본 소제목 문단을 복사해 번호 n·제목만 바꾼다. src = (_sub_heading_from_original 결과) 또는 None."""
+    if src is None:
+        p = etree.Element(qn("w:p"))
+        ppr = etree.SubElement(p, qn("w:pPr"))
+        etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "120", qn("w:after"): "120"})
+        r = etree.SubElement(p, qn("w:r"))
+        rpr = etree.SubElement(r, qn("w:rPr"))
+        etree.SubElement(rpr, qn("w:b"))
+        etree.SubElement(rpr, qn("w:sz"), {qn("w:val"): "22"})
+        etree.SubElement(r, qn("w:t")).text = f"{n}. {title}"
+        return p
+    p0, kind, m = src
+    new = copy.deepcopy(p0)
+    num = (_ROMAN if m.group(2).strip() in _ROMAN else _ROMAN_ASCII)[n] if kind == "roman" else str(n)
+    _set_visible_text(new, m.group(1) + num + m.group(3) + title)
+    for sp in new.iter(qn("w:sectPr")):
+        sp.getparent().remove(sp)
+    sp = new.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+    if sp is not None:
+        sp.set(qn("w:before"), "120")
+    ind = new.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+    if ind is not None:
+        ind.set(qn("w:right"), "0")
+    return new
+
+
+def _template_bond_els(tpl, doc, bond, diagram_png=None, sub=None):
     """양식의 [사모사채 개요 표][빈 줄][금융 구조도 제목] 을 복사하고, 표 내용은 입력값(없으면 양식 글), 제목 아래 구조도 그림."""
     els = _tpl_body(tpl)
     ti = next((i for i, el in enumerate(els) if el.tag == qn("w:tbl")
@@ -1492,6 +1583,11 @@ def _template_bond_els(tpl, doc, bond, diagram_png=None):
         return None
     out = []
     tbl = _copy_from_template(tpl, doc, els[ti])
+    for fl in tbl.findall(f"{qn('w:tblPr')}/{qn('w:tblpPr')}"):   # 떠 있는 표 설정을 빼야 제목 아래에 순서대로 놓인다
+        fl.getparent().remove(fl)
+    ov = tbl.find(f"{qn('w:tblPr')}/{qn('w:tblOverlap')}")
+    if ov is not None:
+        ov.getparent().remove(ov)
     for tr in tbl.findall(qn("w:tr")):
         tcs = tr.findall(qn("w:tc"))
         if len(tcs) < 2:
@@ -1509,7 +1605,8 @@ def _template_bond_els(tpl, doc, bond, diagram_png=None):
     out.append(tbl)
     hi = next((i for i in range(ti + 1, len(els)) if "구조도" in "".join(t.text or "" for t in els[i].iter(qn("w:t")))), None)
     if hi is not None and diagram_png:                       # 구조도를 안 만들었으면 '금융 구조도' 제목도 안 넣는다
-        for el in els[ti + 1:hi + 1]:
+        out.append(_make_sub_heading(sub, 2, "금융 구조도"))   # 2026-10-14: 원본 소제목 모양(개요와 같은 글꼴·크기)
+        for el in []:
             c = _copy_from_template(tpl, doc, el)
             for br in list(c.iter(qn("w:br"))):          # 제목 뒤 쪽나눔은 뺀다(구조도 그림이 그 아래로 와야 한다)
                 if br.get(qn("w:type")) == "page":
@@ -1778,27 +1875,16 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep["금융 대단원 제목 바꿈"] = rename_finance_headings(doc)   # 개요 제목(원본 첫 대단원 복사)을 만든 뒤에
     rep["흰 테두리 검정"] = whiten_borders_to_black(doc)
     rep["원본 구조도 줄 지움"] = drop_structure_rows(doc)
-    tpl_bond = _template_bond_els(tpl, doc, bond, diagram_png)   # 2026-10-13 양식(최종): 기본 글 든 표 + 금융 구조도
+    sub = _sub_heading_from_original(doc)
+    tpl_bond = _template_bond_els(tpl, doc, bond, diagram_png, sub)   # 양식(최종) 표 + 금융 구조도
     if tpl_bond:
-        bond_els = bond_els[:1] + tpl_bond
-    # 제목은 원본 대단원 모양 그대로(2026-10-13) — 'Ⅰ.' 같은 번호를 도구가 정하지 않는다
-    if head is not None:
-        if head.tag == qn("w:p"):
-            sp = head.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
-            if sp is not None:
-                sp.set(qn("w:before"), "0")
-            bond_els[0] = head
-            rep["개요 제목"] = "원본 대단원 문단 모양: " + "".join(t.text or "" for t in head.iter(qn("w:t")))
-        else:
-            gap = etree.Element(qn("w:p"))                  # 표 두 개가 붙으면 워드가 한 표로 합친다 → 사이에 빈 문단
-            gp = etree.SubElement(gap, qn("w:pPr"))
-            etree.SubElement(gp, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): "200",
-                                                    qn("w:lineRule"): "exact"})
-            bond_els[0:1] = [head, gap]
-            rep["개요 제목"] = "원본 번호 상자 모양: " + "".join(t.text or "" for t in head.iter(qn("w:t")))
-    else:
-        _set_par_text(bond_els[0], "사모사채 개요")
-        rep["개요 제목"] = "원본 대단원 모양을 못 찾아 번호 없이"
+        # ★2026-10-14 사용자 확정: 사모사채 개요는 대단원(번호 상자)이 아니라 원본 소제목 모양 '1. 본건 사모사채 개요',
+        #   그 아래 같은 모양 '2. 금융 구조도'. (하이라이트 다음인데 '0' 이 붙어 이상했다)
+        bond_els = [_make_sub_heading(sub, 1, "본건 사모사채 개요")] + tpl_bond
+        rep["개요 제목"] = "원본 소제목 모양" if sub is not None else "기본 모양(원본 소제목 못 찾음)"
+    if not tpl_bond:                                        # 양식에서 개요 표를 못 찾았을 때만 옛 방식
+        _set_par_text(bond_els[0], "본건 사모사채 개요")
+        rep["개요 제목"] = "양식 표 못 찾음"
     if bond_place is not None and bond_place[1]:
         h = bond_els[0]                                     # 같은 쪽에 이을 때는 위와 조금 띄운다
         ppr = _first_child(h, "pPr")

@@ -30,8 +30,11 @@ REPEAT = 0.5          # 절반 넘는 쪽에 같은 자리로 나오면 '되풀�
 
 # 회사 양식(형식_1) 규격 — cm
 PAGE_W, PAGE_H = 21.0, 29.7
-TOP_CM, BOTTOM_CM, LEFT_CM, RIGHT_CM = 3.0, 2.5, 2.5, 2.5
-HEADER_CM, FOOTER_CM = 1.7, 1.2
+# ★양식(최종) 파일의 값 그대로(twips → cm): 위 1701·아래 1440·왼 1440·오른 1440·머리말 975·꼬리말 697.
+#   예전엔 2.5/1.7 로 어림해 표지·개요 쪽(양식 구역)과 본문 쪽의 머리말 자리·폭이 조금씩 달랐다(2026-10-14 사용자 지적).
+_TW = 2.54 / 1440
+TOP_CM, BOTTOM_CM, LEFT_CM, RIGHT_CM = 1701 * _TW, 1440 * _TW, 1440 * _TW, 1440 * _TW
+HEADER_CM, FOOTER_CM = 975 * _TW, 697 * _TW
 BOX_W_PT = (PAGE_W - LEFT_CM - RIGHT_CM) / 2.54 * 72        # 본문 칸 가로(pt)
 BOX_H_PT = (PAGE_H - TOP_CM - BOTTOM_CM) / 2.54 * 72        # 본문 칸 세로(pt)
 HEIGHT_SAFETY = 0.89  # 글꼴이 Pretendard 로 바뀌면 줄이 조금 높아진다 → 세로는 8% 여유(5% 로는 등촌역 쪽 몇 개가 넘쳤다)
@@ -771,6 +774,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["글자 폭 원본 맞춤"] = match_char_width(d, width_ratio)
     rep["글머리 앞 줄바꿈"] = break_before_bullets(d)
     rep["선만 있는 표 지움"] = drop_grid_tables(d)
+    rep["칸 안 작은 표 풂"] = unwrap_cell_boxes(d)
     rep["쪼개진 표 합침"] = merge_split_tables(d)
     rep["칸 안 쪼개진 표 합침"] = merge_split_tables_in_cells(d)
     rep["흰 글씨 칸 바탕"] = fill_white_text_cells(d)
@@ -1523,6 +1527,42 @@ def clean_broken_nested_tables(d, grps):
     return n
 
 
+def unwrap_cell_boxes(d):
+    """칸 안에 든 1줄 1칸짜리 작은 표(pdf2docx 가 원본 '글 + 칠한 네모' 를 이렇게 만든다)를 풀어 글만 칸에 남긴다.
+    ★돈암동 머리글 '구 분 | 내 용': 바깥 칸은 네이비로 칠했는데 안의 작은 표가 원본 검정이라 네이비 위에 검은 네모가 떴다
+    (2026-10-14 사용자 지적 '헤더 글 부분이 도형처럼 겹친다'). 작은 표의 칠은 바깥 칸에 칠이 없을 때만 옮긴다. 푼 수."""
+    import copy
+    from docx.oxml.ns import qn
+    n = 0
+    for tc in list(d.element.body.iter(qn("w:tc"))):
+        for t in [c for c in tc if c.tag == qn("w:tbl")]:
+            rows = t.findall(qn("w:tr"))
+            if len(rows) != 1:
+                continue
+            cells = rows[0].findall(qn("w:tc"))
+            if len(cells) != 1 or cells[0].find(".//" + qn("w:tbl")) is not None:
+                continue
+            inner = cells[0]
+            ishd = inner.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+            tcpr = tc.find(qn("w:tcPr"))
+            if ishd is not None and tcpr is not None and tcpr.find(qn("w:shd")) is None:
+                sh = copy.deepcopy(ishd)
+                after = next((tcpr.find(qn(x)) for x in ("w:noWrap", "w:tcMar", "w:textDirection", "w:tcFitText",
+                                                          "w:vAlign", "w:hideMark") if tcpr.find(qn(x)) is not None), None)
+                after.addprevious(sh) if after is not None else tcpr.append(sh)
+            for p in inner.findall(qn("w:p")):
+                t.addprevious(p)
+            tc.remove(t)
+            n += 1
+        # 칸 끝에 남은 1pt 빈 문단(작은 표 뒤 자리 맞춤용)은 지운다 — 칸에 문단이 하나 넘게 있을 때만
+        ps = tc.findall(qn("w:p"))
+        if len(ps) > 1 and not "".join(x.text or "" for x in ps[-1].iter(qn("w:t"))).strip()                 and ps[-1].find(".//" + qn("w:drawing")) is None and tc[-1] is ps[-1]                 and ps[-1].getprevious() is not None and ps[-1].getprevious().tag != qn("w:tbl"):   # 표 바로 뒤 문단은 워드 규칙상 꼭 있어야 한다(지우면 '파일 손상')
+            sp = ps[-1].find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+            if sp is not None and sp.get(qn("w:lineRule")) == "exact":
+                tc.remove(ps[-1])
+    return n
+
+
 def _is_wrapper_tbl(t):
     from docx.oxml.ns import qn
     rows = t.findall(qn("w:tr"))
@@ -1973,6 +2013,59 @@ def _set_geometry(sec, new_page=True):
         sec.start_type = WD_SECTION.NEW_PAGE
 
 
+def stretch_table_to_width(tbl, target_tw):
+    """맨 바깥 표를 본문 폭(target_tw, twips) 그대로 늘린다 — 왼쪽 들여쓰기 0, 칸 폭은 같은 비율로.
+    ★2026-10-14 사용자 지적(편집해 보여 줌): 표가 머리말 선보다 좁고 여백이 더 컸다. 머리말 길이 = 표 시작~끝.
+    본문 폭의 70% 보다 좁은 표(작은 표·옆에 둔 표)는 원본 크기 그대로 둔다."""
+    from docx.oxml.ns import qn
+    grid = tbl.find(qn("w:tblGrid"))
+    if grid is None:
+        return
+    cols = grid.findall(qn("w:gridCol"))
+    ws = [float(c.get(qn("w:w")) or 0) for c in cols]
+
+    def row_sum(tr):
+        tot = 0.0
+        for tc in tr.findall(qn("w:tc")):
+            w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            if w is None or not re.fullmatch(r"[\d.]+", w.get(qn("w:w")) or "") or w.get(qn("w:type")) not in (None, "dxa"):
+                return None
+            tot += float(w.get(qn("w:w")))
+        return tot
+    # ★실제 폭은 칸 폭(tcW) 합 — pdf2docx 는 눈금(gridCol)을 똑같이 나눠 적어 둘이 다를 때가 있다(돈암 9070 vs 10046)
+    sums = [x for x in (row_sum(tr) for tr in tbl.findall(qn("w:tr"))) if x]
+    total = max(sums) if sums else sum(ws)
+    if total <= 0 or total < target_tw * 0.7:
+        return
+    f = target_tw / total
+    first = tbl.find(qn("w:tr"))
+    fw = [float(tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}").get(qn("w:w"))) for tc in first.findall(qn("w:tc"))]         if first is not None and row_sum(first) else None
+    if fw and len(fw) == len(cols) and all(tc.find(f"{qn('w:tcPr')}/{qn('w:gridSpan')}") is None
+                                           for tc in first.findall(qn("w:tc"))):
+        for c, w in zip(cols, fw):                           # 눈금을 첫 줄 칸 폭에 맞춘다
+            c.set(qn("w:w"), str(int(round(w * f))))
+    else:
+        gf = target_tw / (sum(ws) or 1)
+        for c, w in zip(cols, ws):
+            c.set(qn("w:w"), str(int(round(w * gf))))
+    for tc in tbl.iter(qn("w:tc")):                          # 안쪽 표 칸까지 같은 비율(안쪽 표도 같이 넓어진다)
+        w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+        if w is not None and re.fullmatch(r"[\d.]+", w.get(qn("w:w")) or "") and w.get(qn("w:type")) in (None, "dxa"):
+            w.set(qn("w:w"), str(int(round(float(w.get(qn("w:w"))) * f))))
+    for g in tbl.iter(qn("w:gridCol")):
+        if g.getparent() is not grid and re.fullmatch(r"[\d.]+", g.get(qn("w:w")) or ""):
+            g.set(qn("w:w"), str(int(round(float(g.get(qn("w:w"))) * f))))
+    tp = tbl.find(qn("w:tblPr"))
+    ind = tp.find(qn("w:tblInd")) if tp is not None else None
+    if ind is not None:
+        ind.set(qn("w:w"), "0")
+        ind.set(qn("w:type"), "dxa")
+    tw = tp.find(qn("w:tblW")) if tp is not None else None
+    if tw is not None:
+        tw.set(qn("w:w"), str(int(target_tw)))
+        tw.set(qn("w:type"), "dxa")
+
+
 def _fit_page(secs, grps, box):
     """원본 한 쪽(구역 1개 이상)을 양식 규격으로: 내용을 같은 비율로 줄이고(크면만) 위쪽 빈 자리를 없앤다.
 
@@ -2010,6 +2103,10 @@ def _fit_page(secs, grps, box):
         if grp:
             _flatten_holder(grp[-1]) if grp[-1].find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None else None
     trim_trailing(grps[-1])
+    for grp in grps:                                         # 표는 머리말·꼬리말 선 길이(본문 폭) 그대로 꽉 채운다
+        for el in grp:
+            if el.tag == qn("w:tbl"):
+                stretch_table_to_width(el, BOX_W_PT * 20)
     return s, box.height * s
 
 
