@@ -33,6 +33,7 @@ PAGE_W, PAGE_H = 21.0, 29.7
 # ★양식(최종) 파일의 값 그대로(twips → cm): 위 1701·아래 1440·왼 1440·오른 1440·머리말 975·꼬리말 697.
 #   예전엔 2.5/1.7 로 어림해 표지·개요 쪽(양식 구역)과 본문 쪽의 머리말 자리·폭이 조금씩 달랐다(2026-10-14 사용자 지적).
 _TW = 2.54 / 1440
+MIN_SZ = 16          # 본문 글자 최소 크기(반 pt 단위) = 8pt
 TOP_CM, BOTTOM_CM, LEFT_CM, RIGHT_CM = 1701 * _TW, 1440 * _TW, 1440 * _TW, 1440 * _TW
 HEADER_CM, FOOTER_CM = 975 * _TW, 697 * _TW
 BOX_W_PT = (PAGE_W - LEFT_CM - RIGHT_CM) / 2.54 * 72        # 본문 칸 가로(pt)
@@ -2103,6 +2104,13 @@ def _fit_page(secs, grps, box):
         if grp:
             _flatten_holder(grp[-1]) if grp[-1].find(qn("w:pPr") + "/" + qn("w:sectPr")) is not None else None
     trim_trailing(grps[-1])
+    if s < 0.999:                                            # 글자 최소 8pt 로 커진 칸 글이 잘리지 않게
+        for grp in grps:
+            for el in grp:
+                for tr in el.iter(qn("w:tr")):
+                    h = tr.find(f"{qn('w:trPr')}/{qn('w:trHeight')}")
+                    if h is not None and h.get(qn("w:hRule")) == "exact" and                             any((t.text or "").strip() for t in tr.iter(qn("w:t"))):
+                        h.set(qn("w:hRule"), "atLeast")
     for grp in grps:                                         # 표는 머리말·꼬리말 선 길이(본문 폭) 그대로 꽉 채운다
         for el in grp:
             if el.tag == qn("w:tbl"):
@@ -2277,7 +2285,12 @@ def scale_xml(root, s, old_left=0.0, sw=None):
         if tag.startswith(W):
             name = tag[len(W):]
             if name in _HALF:
-                mul(el, "val", minimum=2)
+                v = el.get(W + "val")
+                if name in ("sz", "szCs") and v and v.isdigit():
+                    # ★글자는 줄여도 최소 8pt(원본이 8pt 보다 작으면 원본 크기) — 2026-10-14 사용자 확정 '작아도 8'
+                    el.set(W + "val", str(max(int(round(int(v) * s)), min(int(v), MIN_SZ))))
+                else:
+                    mul(el, "val", minimum=2)
             elif name == "spacing":
                 if el.getparent().tag == W + "rPr":
                     mul(el, "val")
