@@ -121,7 +121,7 @@ def _prepare(name, data):
         if str(k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
             SS.pop(k, None)
     for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages",
-              "cf_dg_no", "cf_diag_png", "cf_diag_pptx", "cf_diag_err"):
+              "cf_dg_no", "cf_diag_err"):
         SS.pop(k, None)
 
 
@@ -372,8 +372,6 @@ elif step == 4:
                     for _k in list(SS.keys()):
                         if str(_k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
                             SS.pop(_k, None)
-                    for _k in ("cf_diag_png", "cf_diag_pptx", "cf_diag_err"):
-                        SS.pop(_k, None)
                     st.rerun()
 
         # ── ② 항목 채우기 ───────────────────────────
@@ -385,6 +383,7 @@ elif step == 4:
             st.markdown("---")
             st.markdown(f"#### ② 항목 채우기 — {_d['title']}")
             st.caption("원본에서 찾은 값으로 미리 채워두었습니다. **틀린 것만 고치면 됩니다.** "
+                       "미리보기는 없습니다 — 다 채우고 다음 단계로 넘어가면 '만들기' 때 구조도를 그려 넣습니다. "
                        "이 딜에 없는 항목은 오른쪽 **빼기** 를 체크하세요(그림에서 상자째 사라집니다). "
                        "비워두고 넘어가도 됩니다.")
 
@@ -416,57 +415,10 @@ elif step == 4:
                     SS[_xk] = _c2.checkbox("빼기", value=SS[_xk], key="w_" + _xk,
                                            help="이 항목을 그림에서 아예 없앱니다")
 
-            st.markdown("---")
-            st.markdown("#### ③ 구조도 만들기")
-            _vals = {f["key"]: SS.get(f"cf_dv_{_no}_{f['key']}", "") for f in _d["fields"]}
-            _rm = {f["key"] for f in _d["fields"] if SS.get(f"cf_dx_{_no}_{f['key']}")}
-            _b1, _b2 = st.columns(2)
-            if _b1.button("미리보기 만들기 (이대로 쓰기)", type="primary", use_container_width=True,
-                          help="지금 채운 내용으로 구조도를 만들어 아래에 그림으로 보여줍니다. 이 그림이 워드에 들어갑니다."):
-                with st.spinner("구조도를 만드는 중… (10초쯤 걸립니다)"):
-                    try:
-                        _pp, _png, _err = _dt.build(_no, _vals, _rm)
-                        SS["cf_diag_pptx"], SS["cf_diag_png"], SS["cf_diag_err"] = _pp, _png, _err
-                    except Exception as e:
-                        SS["cf_diag_err"] = str(e)
-                st.rerun()
-            if SS.get("cf_diag_pptx"):
-                _b2.download_button("PPT로 내려받아 직접 고치기", data=SS["cf_diag_pptx"],
-                                    file_name=f"금융구조도_{_d['title']}.pptx",
-                                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                                    use_container_width=True,
-                                    help="파워포인트에서 자유롭게 고칠 수 있습니다. 고친 뒤 아래에 다시 올려주세요.")
-            else:
-                _b2.button("PPT로 내려받아 직접 고치기", use_container_width=True, disabled=True,
-                           help="먼저 왼쪽 '이대로 쓰기' 를 눌러 구조도를 만들어 주세요.")
-            st.markdown("##### 미리보기 — 완성된 구조도")
-            if SS.get("cf_diag_err"):
-                st.warning(f"미리보기를 만들지 못했습니다 — {SS['cf_diag_err']}")
-            if SS.get("cf_diag_png"):
-                st.image(SS["cf_diag_png"], use_container_width=True,
-                         caption="이 모습 그대로 사모사채 개요 아래 '금융 구조도' 에 들어갑니다.")
-            elif not SS.get("cf_diag_err"):
-                st.info("위 **'미리보기 만들기'** 를 누르면 완성된 구조도가 여기에 그림으로 보입니다. (10초쯤 걸립니다)")
 
-            # ── ④ 직접 고친 것 올리기 ────────────────
-            with st.expander("직접 고친 구조도 올리기 (선택)"):
-                st.caption("위에서 내려받은 PPT를 파워포인트에서 고쳤다면 여기에 올려주세요.\n\n"
-                           "· **PPT 파일** 로 올리면 그 구조도를 그림으로 바꿔 넣습니다.\n"
-                           "· 이미지로 주고 싶다면, 파워포인트에서 구조도를 선택하고 **우클릭 → 그림으로 저장** 한 뒤 "
-                           "그 파일을 올리세요.")
-                _up = st.file_uploader("고친 구조도 (PPTX 또는 이미지)", type=["pptx", "png", "jpg", "jpeg"],
-                                       key="w_cf_diag_up")
-                if _up is not None:
-                    if _up.name.lower().endswith(".pptx"):
-                        _png, _err = _dt.pptx_to_png(_up.getvalue())
-                        SS["cf_diag_pptx"], SS["cf_diag_png"], SS["cf_diag_err"] = _up.getvalue(), _png, _err
-                        st.success("고친 PPT를 받았습니다. 이걸로 넣습니다.")
-                    else:
-                        SS["cf_diag_png"], SS["cf_diag_err"] = _up.getvalue(), None
-                        st.success("이미지를 받았습니다. 이걸로 넣습니다.")
-
-        st.success("구조도 준비됨 — 사모사채 개요 아래에 들어갑니다." if SS.get("cf_diag_png") else
-                   "아직 구조도를 만들지 않았습니다. 필요 없으면 그냥 넘어가세요.")
+        st.success(f"구조도 '{_d['title']}' 을(를) 골랐습니다 — **5단계 '만들기' 를 누를 때 지금 채운 값으로 만들어** "
+                   "사모사채 개요 아래에 넣습니다." if _d else
+                   "구조도를 고르지 않았습니다. 필요 없으면 그냥 넘어가세요(구조도 없이 만듭니다).")
 
     st.markdown("---")
     p1, _sp, p3 = st.columns([2, 4, 2])
@@ -558,7 +510,7 @@ elif step == 5:
         if not engine.template_path():
             st.error("회사 양식 파일(양식\\회사양식_틀.docx)을 찾지 못해 만들 수 없습니다. 관리자에게 알려 주세요.")
         elif st.button("📝 회사 양식 워드 만들기", type="primary"):
-            for k in ("cf_out", "cf_rep", "cf_build_err"):
+            for k in ("cf_out", "cf_rep", "cf_build_err", "cf_diag_err"):
                 SS.pop(k, None)
             pick = SS.get("cf_photo_pick", -1)
             photos = SS.get("cf_photos") or []
@@ -572,12 +524,23 @@ elif step == 5:
                     bar.progress(min(max(v, 0.0), 1.0), text=f"만드는 중입니다… {msg}")
                 body, rep1 = pdf_input.convert(SS["cf_bytes"], drop_cover=SS.get("cf_drop_cover", True),
                                                drop_last=SS.get("cf_drop_tail", False), progress=_prog)
+                _prog(0.97, "금융 구조도 그리는 중…")
+                _diag_png = None
+                if SS.get("cf_dg_no"):                       # 4단계에서 고른 틀 + 채운 값으로 지금 만든다(미리보기 없음)
+                    import diagram_tpl as _dt
+                    _L = next((x for x in _dt.layouts() if x["no"] == SS["cf_dg_no"]), None)
+                    if _L:
+                        _vals = {f["key"]: SS.get(f"cf_dv_{_L['no']}_{f['key']}", f["text"]) for f in _L["fields"]}
+                        _rm = {f["key"] for f in _L["fields"] if SS.get(f"cf_dx_{_L['no']}_{f['key']}")}
+                        _pp, _diag_png, _derr = _dt.build(_L["no"], _vals, _rm)
+                        if not _diag_png:
+                            SS["cf_diag_err"] = _derr or "그림으로 바꾸지 못했습니다"
                 _prog(0.98, "표지·사모사채 개요·금융 구조도·연락처 넣는 중…")
                 place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])   # 개요는 원본 하이라이트 뒤
                 out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
                                          header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
                                          photo=photo, bond=bond, bond_place=place,
-                                         diagram_png=SS.get("cf_diag_png"))
+                                         diagram_png=_diag_png)
                 bar.empty()
                 SS["cf_out"] = out
                 SS["cf_rep"] = {**rep1, **rep2}
@@ -604,6 +567,8 @@ elif step == 5:
                        f"{max(p['비율'] for p in small) * 100:.0f}% 로 줄인 쪽 {len(small)}개)." if small else "."),
                     f"표 머리글 칸 {rep.get('머리글 칸', 0)}개를 회사 네이비로 바꿨습니다.",
                     f"사모사채 개요·금융 구조도 : {rep.get('개요 자리', '')}."]
+            if SS.get("cf_dg_no") and SS.get("cf_diag_err"):
+                done.append(f"⚠️ 금융 구조도를 그리지 못해 빼고 만들었습니다 ({SS['cf_diag_err']}). 관리자에게 알려 주세요.")
             if rep.get("원본 하이라이트 뺀 쪽"):
                 done.append("원본 하이라이트 쪽을 뺐습니다 : " + ", ".join(f"{p}쪽" for p in rep["원본 하이라이트 뺀 쪽"]) + ".")
             if rep.get("원본 표지 뺌"):
