@@ -281,12 +281,17 @@ def _par_el(par, cell, before_pt=0.0):
     jc, left = _align(par, cell)
     sizes = [s["size"] for _, sp in par for s in sp if s]
     size = max(sizes) if sizes else 9
+    # ★줄 간격은 원본에서 잰 줄 사이(한 줄이면 그 줄 높이)로. 예전엔 최소 200(1.3배)·한 줄 240 으로 잡아
+    #   빽빽한 표(내곡 실거래비교·효자 미매입 필지)가 원본보다 길어져 쪽이 넘쳤다(2026-10-15).
     if len(par) >= 2:
         pitch = (par[-1][0].y0 - par[0][0].y0) / (len(par) - 1)
-        line = int(round(pitch / (size * 1.5625) * 240))
-        line = max(200, min(line, 480))
     else:
-        line = 240
+        pitch = par[0][0].height * 1.12
+    line = int(round(pitch / (size * 1.5625) * 240))
+    line = max(150, min(line, 480))
+    if before_pt:                                              # before_pt = 앞 문단 마지막 줄 위 ~ 이 문단 첫 줄 위(원본)
+        lh = line / 240 * size * 1.5625                        # 워드 실제 줄 높이
+        before_pt = min(24.0, max(0.0, before_pt - lh))
     etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): str(max(0, _tw(before_pt))), qn("w:after"): "0",
                                             qn("w:line"): str(line), qn("w:lineRule"): "auto"})
     bg = _bullet_geom(par)
@@ -502,7 +507,7 @@ def _intervals_reach(rs, lo, hi, tol=3.0):
     return any(a <= lo + tol or b >= hi - tol for a, b in merged)
 
 
-def _split_islands(segs, box):
+def _split_islands(segs, box, avoid=()):
     """(바깥 선들, [안쪽 표 선 묶음…], [안쪽 표 자리…]).
     바깥 표의 칸 줄(세로선)은 표 맨 위나 맨 아래까지 닿는다. 칸 가운데에만 떠 있는 세로선 묶음 + 거기 닿은 가로선 = 안쪽 표
     (내곡동 '신탁사' 칸 안 [구분|신탁 BL] 표 — 오른쪽은 바깥 표 선에 붙어 있어도 안쪽 표다)."""
@@ -554,6 +559,11 @@ def _split_islands(segs, box):
                 continue
             R = fitz.Rect(min(r.x0 for r in hb), min(_mid(r, "h") for r in hb),
                           max(r.x1 for r in hb), max(_mid(r, "h") for r in hb))
+            # ★왼쪽 끝은 안쪽 표 세로선 시작보다 왼쪽으로 못 간다 — 옆 그림(신촌 지도) 위 가로선까지 묶여 표가 그림을 덮었다
+            fx0 = min(_mid(r, "v") for r, o, _ in fvs)
+            left = fitz.Rect(R.x0, R.y0, fx0, R.y1)
+            if R.x0 < fx0 - TOL and any((a_ & left).get_area() > left.get_area() * 0.3 for a_ in avoid if a_.intersects(left)):
+                R = fitz.Rect(fx0, R.y0, R.x1, R.y1)
             nfx = len(_cluster([_mid(r, "v") for r, o, _ in fvs]))
             if nfx <= 1 and abs(R.x0 - xl) < 2.5 and abs(R.x1 - xr) < 2.5:
                 continue                                       # 칸 폭 꽉 찬 세로줄 하나 = 몇 줄만 나뉜 합친 칸(고산 공급개요 '아파트|84A')
@@ -687,7 +697,7 @@ def _pic_par(part, png, rect, cell):
 
 
 def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False, pics=(), part=None):
-    outer, islands, ibox = _split_islands(segs, box)            # 안쪽 표 안의 안쪽 표도(방배동 금융조건)
+    outer, islands, ibox = _split_islands(segs, box, [r for r, _ in pics])   # 안쪽 표 안의 안쪽 표도(방배동 금융조건)
     cells, xs, ys = _cells_from_segs(outer, box)
     if len(cells) < 2:
         return None
@@ -801,36 +811,104 @@ def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False,
                 for g_i in pic_of.get(k, []):
                     items.append((my_pics[g_i][0].y0, 2, g_i))
                 items.sort(key=lambda x: (x[0], x[1]))
-                prev = None                                    # 앞 문단 마지막 줄(원본 문단 사이 간격 그대로)
-                for y, kind, val in items:
+
+                def ibb(it):                                   # 항목 자리
+                    y, kind, val = it
                     if kind == 0:
-                        before = 0.0
-                        if prev is not None:
-                            sz = max([s["size"] for _, sp in val for s in sp if s] or [9])
-                            before = max(0.0, (val[0][0].y0 - prev.y0) - sz * 1.5625 * 1.0)
-                            before = min(before, 24)
-                        tc.append(_par_el(val, rect, before))
-                        prev = val[-1][0]
-                    elif kind == 2:
-                        tc.append(_pic_par(part, my_pics[val][1], my_pics[val][0], rect))
-                        prev = None
-                    else:
-                        prev = None
-                        b = ibox[val]
-                        sub = _build(page, islands[val], b, lines, fills,
-                                     [x for x in text_lines if b.intersects(x[0])], nested=True,
-                                     pics=[g for g in my_pics if (b + (-2, -2, 2, 2)).contains(g[0])], part=part)
-                        if sub is not None:
-                            tc.append(sub)
-                            tc.append(_empty_p("40"))          # 워드: 칸 안 표 뒤에는 문단이 꼭 있어야 한다
-                        else:                                  # 안쪽 표를 못 짜면 그 안 그림·글을 칸에 그대로(빠뜨리지 않게)
-                            for r, png in my_pics:
-                                if (b + (-2, -2, 2, 2)).contains(r):
-                                    tc.append(_pic_par(part, png, r, rect))
-                            inner_txt = [(bx, sp) for key, bx, sp in _pieces(text_lines, lambda pt: "x" if b.contains(pt) else None)
-                                         if key == "x"]
-                            for par in (_paragraphs(inner_txt, b) if inner_txt else []):
-                                tc.append(_par_el(par, rect))
+                        r_ = fitz.Rect(val[0][0])
+                        for rr, _ in val[1:]:
+                            r_ |= rr
+                        return r_
+                    return fitz.Rect(my_pics[val][0]) if kind == 2 else fitz.Rect(ibox[val])
+
+                def emit(its, host, area):
+                    prev = None                                # 앞 문단 마지막 줄(원본 문단 사이 간격 그대로)
+                    for y, kind, val in its:
+                        if kind == 0:
+                            before = 0.0
+                            if prev is not None:
+                                before = max(0.0, val[0][0].y0 - prev.y0)
+                            host.append(_par_el(val, area, before))
+                            prev = val[-1][0]
+                        elif kind == 2:
+                            host.append(_pic_par(part, my_pics[val][1], my_pics[val][0], area))
+                            prev = None
+                        else:
+                            prev = None
+                            b = ibox[val]
+                            sub = _build(page, islands[val], b, lines, fills,
+                                         [x for x in text_lines if b.intersects(x[0])], nested=True,
+                                         pics=[g for g in my_pics if (b + (-2, -2, 2, 2)).contains(g[0])], part=part)
+                            if sub is not None:
+                                host.append(sub)
+                                host.append(_empty_p("40"))    # 워드: 칸 안 표 뒤에는 문단이 꼭 있어야 한다
+                            else:                              # 안쪽 표를 못 짜면 그 안 그림·글을 칸에 그대로(빠뜨리지 않게)
+                                for r, png in my_pics:
+                                    if (b + (-2, -2, 2, 2)).contains(r):
+                                        host.append(_pic_par(part, png, r, area))
+                                inner_txt = [(bx, sp) for key, bx, sp in _pieces(text_lines, lambda pt: "x" if b.contains(pt) else None)
+                                             if key == "x"]
+                                for par in (_paragraphs(inner_txt, b) if inner_txt else []):
+                                    host.append(_par_el(par, area))
+
+                # ★칸 안에 그림·표가 옆으로 나란히 있으면(신촌 '사업추진 현황' 지도 | 지구 표) 위아래로 쌓지 말고 옆으로 —
+                #   쌓으면 칸이 두 배로 길어져 쪽이 넘쳤다(2026-10-15). 왼쪽 묶음 | 오른쪽 묶음 사이 빈 세로 띠로 가른다.
+                split = None
+                bbs = [ibb(it) for it in items]
+                if len(items) >= 2 and any(it[1] in (1, 2) for it in items):
+                    xs_ = sorted(set([round(b_.x1, 1) for b_ in bbs]))
+                    for xcut in xs_:
+                        L = [i for i, b_ in enumerate(bbs) if b_.x1 <= xcut + 0.5]
+                        R = [i for i, b_ in enumerate(bbs) if b_.x0 >= xcut - 1]
+                        if not L or not R:
+                            continue
+                        lb = fitz.Rect(bbs[L[0]])
+                        for i in L[1:]:
+                            lb |= bbs[i]
+                        rb = fitz.Rect(bbs[R[0]])
+                        for i in R[1:]:
+                            rb |= bbs[i]
+                        band = fitz.Rect(lb) | rb
+                        F = [i for i in range(len(items)) if i not in L and i not in R]
+                        # 칸 폭 전체 항목(위·아래 글)은 띠와 높이가 겹치지 않아야 — 띠 위/아래에 그대로 둔다(신촌 토지매입현황)
+                        if any(min(bbs[i].y1, band.y1) - max(bbs[i].y0, band.y0) > 2 for i in F):
+                            continue
+                        ov = min(lb.y1, rb.y1) - max(lb.y0, rb.y0)
+                        if ov > 0.4 * min(lb.height, rb.height) and any(items[i][1] in (1, 2) for i in L + R):
+                            split = (L, R, (xcut + rb.x0) / 2, [i for i in F if bbs[i].y1 <= band.y0 + 2],
+                                     [i for i in F if bbs[i].y0 >= band.y1 - 2])
+                            break
+                if split:
+                    L, R, xm, above, below = split
+                    emit([items[i] for i in above], tc, rect)
+                    lay_ = etree.SubElement(tc, qn("w:tbl"))
+                    lp = etree.SubElement(lay_, qn("w:tblPr"))
+                    etree.SubElement(lp, qn("w:tblW"), {qn("w:w"): str(_tw(rect.width)), qn("w:type"): "dxa"})
+                    etree.SubElement(lp, qn("w:tblLayout"), {qn("w:type"): "fixed"})
+                    lcm = etree.SubElement(lp, qn("w:tblCellMar"))
+                    for side in ("left", "right"):
+                        etree.SubElement(lcm, qn("w:" + side), {qn("w:w"): "0", qn("w:type"): "dxa"})
+                    lg = etree.SubElement(lay_, qn("w:tblGrid"))
+                    w1, w2 = _tw(xm - rect.x0), _tw(rect.x1 - xm)
+                    for w_ in (w1, w2):
+                        etree.SubElement(lg, qn("w:gridCol"), {qn("w:w"): str(w_)})
+                    ltr = etree.SubElement(lay_, qn("w:tr"))
+                    for idxs, w_, area in ((L, w1, fitz.Rect(rect.x0, rect.y0, xm, rect.y1)),
+                                           (R, w2, fitz.Rect(xm, rect.y0, rect.x1, rect.y1))):
+                        ltc = etree.SubElement(ltr, qn("w:tc"))
+                        lpr = etree.SubElement(ltc, qn("w:tcPr"))
+                        etree.SubElement(lpr, qn("w:tcW"), {qn("w:w"): str(w_), qn("w:type"): "dxa"})
+                        lb_ = etree.SubElement(lpr, qn("w:tcBorders"))
+                        for side in ("top", "left", "bottom", "right"):
+                            etree.SubElement(lb_, qn("w:" + side), {qn("w:val"): "nil"})
+                        etree.SubElement(lpr, qn("w:vAlign"), {qn("w:val"): "center"})
+                        emit([items[i] for i in idxs], ltc, area)
+                        if ltc[-1].tag != qn("w:p"):
+                            ltc.append(_empty_p())
+                    tc.append(_empty_p("40"))
+                    emit([items[i] for i in below], tc, rect)
+                else:
+                    emit(items, tc, rect)
             if tc[-1].tag != qn("w:p"):
                 tc.append(_empty_p())
             cc += span
@@ -860,6 +938,12 @@ def _page_pics(page):
     return out
 
 
+def _dbg(*a):
+    import os
+    if os.environ.get("TR_DEBUG"):
+        print("[표]", *a)
+
+
 def rebuild_page(page, groups, part=None):
     """한 쪽(pdf2docx 구역 묶음)의 표를 원본 선·칠·글로 다시 짠다. 바꾼 표 [(쪽 안 번호, 칸 수)]."""
     tops = [el for grp in groups for el in grp if el.tag == qn("w:tbl")]
@@ -878,6 +962,22 @@ def rebuild_page(page, groups, part=None):
     for ti, tab in enumerate(tabs):
         tb = fitz.Rect(tab.bbox)
         if tab.row_count < 2 or tb.width < 30:
+            continue
+        # ★표 위·아래 끝에 걸친 큰 그림(+그 테두리)은 표가 아니다 — 내곡 14쪽 지도 테두리가 아래 표와 한 표로 잡혀 표가 갈라졌다
+        cut_top = False
+        for ir in big_imgs:
+            if not ir.intersects(tb) or ir.width < tb.width * 0.5:
+                continue
+            if ir.y0 <= tb.y0 + 6 and ir.y1 < tb.y1 - 15:
+                tb = fitz.Rect(tb.x0, ir.y1 + 0.5, tb.x1, tb.y1)
+                cut_top = True
+            elif ir.y1 >= tb.y1 - 6 and ir.y0 > tb.y0 + 15:
+                tb = fitz.Rect(tb.x0, tb.y0, tb.x1, ir.y0 - 0.5)
+        if cut_top:                                            # 그림을 잘라냈을 때만: 그림 테두리 아래 표 첫 선으로 맞춘다
+            hs_ = sorted(_mid(r, "h") for r, o, real in _segs(lines, fills, tb) if o == "h" and real and r.width > tb.width * 0.5)
+            if hs_ and hs_[0] > tb.y0 + 0.5:
+                tb = fitz.Rect(tb.x0, hs_[0] - 1, tb.x1, tb.y1)
+        if tb.height < 15:
             continue
         # ★세로선이 표 높이 일부만 덮으면 그 범위만 표다 — find_tables 가 머리 줄·점선까지 묶어 쪽 전체(그림·글머리 글 포함)를
         #   표로 잡아 내곡동 하이라이트 글 순서가 뒤섞였다(2026-10-15). 세로선이 이어진 가장 긴 범위로 줄인다.
@@ -922,16 +1022,20 @@ def rebuild_page(page, groups, part=None):
             if hit >= len(cell_txt) * 0.6 and hit > len(cell_txt) / 2:
                 cands.append(t)
         if not cands:
+            _dbg("후보 없음", ti, src_all[:80], [_all_text(t)[:40] for t in tops])
             continue
         try:
             new = _build(page, _segs(lines, fills, tb), tb, lines, fills, text_lines,
                          old_pr=cands[0].find(qn("w:tblPr")), pics=pics, part=part)
-        except _Abort:
+        except _Abort as e:
+            _dbg("중단", ti, e)
             continue
         if new is None:
+            _dbg("못 짬", ti)
             continue
         # 다시 짠 표에서 원본 글이 빠지면 쓰지 않는다(pdf2docx 표와 비교하면 안 된다 — 그쪽이 글을 두 번 넣기도 했다)
         if _missing(src_text, _all_text(new)) > 0.02:
+            _dbg("글 빠짐", ti, _missing(src_text, _all_text(new)))
             continue
         done_boxes.append(tb)
         cands[0].addprevious(new)

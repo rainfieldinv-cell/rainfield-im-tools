@@ -833,6 +833,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["로고 지운 쪽"] = [i + 1 for i in keep if strip_band_logos(doc[i])]
     rep["차트 그림으로 넣은 쪽"] = [i + 1 for i in keep if charts_to_images(doc[i])]
     boxes = [content_box(doc[i]) for i in range(n)]
+    page_lines = {i: page_text_lines(doc[i]) for i in keep}
     sizes = [(doc[i].rect.width, doc[i].rect.height) for i in range(n)]
     # 그림 조각이 아주 많은 쪽(성수동 15쪽 지도 = 조각 237개) 은 pdf2docx 가 한 쪽에 몇 분씩 걸린다 → 처음부터 쪽 그림으로
     heavy = {i for i in keep if len(doc[i].get_image_info()) >= HEAVY_IMAGES}
@@ -932,6 +933,12 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
             got = []
         if got:
             rep["원본 선으로 다시 짠 표"].append((k + 1, len(got)))
+    rep["가짜 굵게 살림"] = 0
+    for (_secs, _grps), k in zip(_pages(d), _done0):
+        try:
+            rep["가짜 굵게 살림"] += apply_bold_segments(_grps, fake_bold_segments(doc[conv.index(k)]))
+        except Exception as e:
+            logging.getLogger(__name__).warning("굵게 살리기 실패 %s쪽: %s", k + 1, e)
     rep["망가진 안쪽 표 그림으로"] = []
     for (_secs, _grps), k in zip(_pages(d), _done0):
         if clean_broken_nested_tables(d, _grps):   # 2026-10-13 끔: 그림(색 안 바뀜)·다시 짜기(그림·글 빠짐) 둘 다 사용자 기준 미달
@@ -960,7 +967,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     done = [k for k in keep if k not in ignored]
     page_info = []
     for (secs, grps), k in zip(_pages(d), done):
-        s, used = _fit_page(secs, grps, boxes[k])
+        s, used = _fit_page(secs, grps, boxes[k], page_lines.get(k))
         page_info.append({"원본쪽": k + 1, "비율": s, "높이": used, "그림": False})
     # 실패해 건너뛴 쪽 → 원본 쪽을 그림으로(제자리에)
     for k in sorted(ignored):
@@ -988,6 +995,107 @@ def _section_groups(d):
             cur = []
     groups.append(cur)
     return groups
+
+
+def fake_bold_segments(page):
+    """'채우기 + 외곽선' 으로 두껍게 그린 글(가짜 굵게) 조각들(빈칸 뺀 글). ★고산3지구 원본 굵은 글씨는 굵은 글꼴이 아니라
+    같은 글자를 외곽선으로 한 번 더 그린 것 → pdf2docx 가 못 알아봐 굵게가 빠졌다(2026-10-15)."""
+    boxes = []
+    try:
+        for t in page.get_texttrace():
+            if t.get("type") in (1, 2) and (t.get("linewidth") or 0) > 0:
+                for c in t["chars"]:
+                    boxes.append(fitz.Rect(c[3]))
+    except Exception:
+        return []
+    if not boxes:
+        return []
+    segs = []
+    for b in page.get_text("rawdict")["blocks"]:
+        for l in b.get("lines", []):
+            cur = ""
+            for sp in l["spans"]:
+                for c in sp["chars"]:
+                    ch = c["c"]
+                    if not ch.strip():
+                        continue
+                    r = fitz.Rect(c["bbox"])
+                    cen = fitz.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+                    if any(bx.contains(cen) for bx in boxes):
+                        cur += ch
+                    else:
+                        if len(cur) >= 4:
+                            segs.append(cur)
+                        cur = ""
+            if len(cur) >= 4:
+                segs.append(cur)
+    return segs
+
+
+def apply_bold_segments(grps, segs):
+    """docx 쪽(구역 묶음) 안 문단에서 segs 글을 찾아 그 글자만 굵게(글 조각을 나눠서). 굵게 한 곳 수."""
+    import copy
+    from docx.oxml.ns import qn
+    if not segs:
+        return 0
+    segs = sorted(set(segs), key=len, reverse=True)
+    n = 0
+    for el in grps_iter(grps):
+        for p in list(el.iter(qn("w:p"))):
+            runs = [r for r in p if r.tag == qn("w:r") and r.find(qn("w:t")) is not None]
+            if not runs:
+                continue
+            chars = []                                         # (run 번호, 글자)
+            for i, r in enumerate(runs):
+                for ch in "".join(t.text or "" for t in r.findall(qn("w:t"))):
+                    chars.append((i, ch))
+            compact = [(k, ch) for k, (i, ch) in enumerate(chars) if ch.strip()]
+            cs = "".join(ch for _, ch in compact)
+            mask = [False] * len(chars)
+            for sg in segs:
+                start = 0
+                while True:
+                    j = cs.find(sg, start)
+                    if j < 0:
+                        break
+                    a, b = compact[j][0], compact[j + len(sg) - 1][0]
+                    for k in range(a, b + 1):
+                        mask[k] = True
+                    start = j + len(sg)
+            if not any(mask):
+                continue
+            k = 0
+            for i, r in enumerate(runs):
+                txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
+                m = mask[k:k + len(txt)]
+                k += len(txt)
+                if not txt or not any(m):
+                    continue
+                pieces, cur, cb = [], "", m[0]
+                for ch, mb in zip(txt, m):
+                    if mb != cb and ch.strip():
+                        pieces.append((cur, cb))
+                        cur, cb = "", mb
+                    cur += ch
+                pieces.append((cur, cb))
+                rpr = r.find(qn("w:rPr"))
+                for text, bold in pieces:
+                    nr = r.makeelement(qn("w:r"), {})
+                    np_ = copy.deepcopy(rpr) if rpr is not None else nr.makeelement(qn("w:rPr"), {})
+                    nr.append(np_)
+                    if bold:
+                        for e in np_.findall(qn("w:b")):
+                            np_.remove(e)
+                        be = np_.makeelement(qn("w:b"), {})
+                        rf = np_.find(qn("w:rFonts"))
+                        (rf.addnext(be) if rf is not None else np_.insert(0, be))
+                        n += 1
+                    t = nr.makeelement(qn("w:t"), {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
+                    t.text = text
+                    nr.append(t)
+                    r.addprevious(nr)
+                r.getparent().remove(r)
+    return n
 
 
 def drop_paragraphs(d, texts):
@@ -1627,7 +1735,6 @@ def even_cell_margins(d):
     왼쪽 정렬 문단은 칸 안 가장 왼쪽 문단을 0 으로 맞추고 상대 위치(들여 쓴 항목·내어쓰기)는 그대로.
     ★pdf2docx 는 칸 여백 0 + 문단 들여쓰기로 글 위치를 흉내 내 정렬이 원본과 어긋났다(2026-10-14 사용자 지적)."""
     from docx.oxml.ns import qn
-    M = 85
     n = 0
     for tc in d.element.body.iter(qn("w:tc")):
         ps = [p for p in tc if p.tag == qn("w:p")]
@@ -1643,6 +1750,13 @@ def even_cell_margins(d):
         for e in list(mar):
             if e.tag in (qn("w:start"), qn("w:end"), qn("w:left"), qn("w:right")):
                 mar.remove(e)
+        # ★좁은 칸은 여백도 좁게(칸 폭의 6%, 최대 85) — 좁은 숫자 칸에서 글자가 한 자씩 꺾여 표가 몇 배로 길어졌다(효자 분양사례, 2026-10-15)
+        tw_ = tcpr.find(qn("w:tcW"))
+        try:
+            cw = int(float(tw_.get(qn("w:w")))) if tw_ is not None and tw_.get(qn("w:type")) in (None, "dxa") else 0
+        except (TypeError, ValueError):
+            cw = 0
+        M = min(85, max(10, int(cw * 0.06))) if cw else 85
         top = mar.find(qn("w:top"))
         lft = mar.makeelement(qn("w:left"), {qn("w:w"): str(M), qn("w:type"): "dxa"})
         top.addnext(lft) if top is not None else mar.insert(0, lft)
@@ -2726,7 +2840,18 @@ def stretch_table_to_width(tbl, target_tw):
         tw.set(qn("w:type"), "dxa")
 
 
-def _fit_page(secs, grps, box):
+def page_text_lines(page):
+    """쪽 글 줄 [(가장 큰 글자 크기, 줄 높이)] — 9pt 규칙으로 커질 몫 어림용."""
+    out = []
+    for b in page.get_text("dict")["blocks"]:
+        for l in b.get("lines", []):
+            sz = [sp["size"] for sp in l["spans"] if sp["text"].strip()]
+            if sz:
+                out.append((max(sz), l["bbox"][3] - l["bbox"][1]))
+    return out
+
+
+def _fit_page(secs, grps, box, lines=None):
     """원본 한 쪽(구역 1개 이상)을 양식 규격으로: 내용을 같은 비율로 줄이고(크면만) 위쪽 빈 자리를 없앤다.
 
     반환: (비율, 결과에서 쓰인 높이 pt)
@@ -2743,6 +2868,27 @@ def _fit_page(secs, grps, box):
     #   예전엔 통째로 줄여 표가 머리말·꼬리말 선보다 좁았다(방배동 86~94%, 2026-10-13 사용자 지적).
     sw = min(1.0, BOX_W_PT / max(old_w, 1))
     s = min(sw, BOX_H_PT * HEIGHT_SAFETY / max(box.height + grow, 1))
+    if lines and s < 0.999:
+        # ★줄인 뒤 본문 글자를 9pt 로 다시 키우면(글자 크기 규칙) 그만큼 길어져 쪽이 넘쳤다(내곡동 하이라이트 각주 한 줄, 2026-10-15)
+        #   → 커질 몫(줄 높이 × 커지는 비율, 줄바꿈 늘어남까지 1.5제곱)을 넣고 쪽에 들어가는 가장 큰 비율을 찾는다.
+        H = box.height + grow
+
+        def need(x):
+            extra = 0.0
+            for sz, h in lines:
+                v = sz * x
+                if MIN_SZ / 2 - 1 <= v < MIN_SZ / 2:
+                    extra += h * ((MIN_SZ / 2 / v) ** 1.5 - 1)
+            return x * (H + extra)
+        lo, hi = 0.3, s
+        if need(hi) > BOX_H_PT * HEIGHT_SAFETY:
+            for _ in range(25):
+                mid = (lo + hi) / 2
+                if need(mid) <= BOX_H_PT * HEIGHT_SAFETY:
+                    lo = mid
+                else:
+                    hi = mid
+            s = lo
     for i, sec in enumerate(secs):
         _set_geometry(sec, new_page=(i == 0))
         cols = sec._sectPr.find(qn("w:cols"))               # 2단 같은 단 너비·간격도 같은 비율로
