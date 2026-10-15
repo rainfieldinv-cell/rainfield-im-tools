@@ -337,8 +337,8 @@ elif step == 4:
     st.markdown("### 4단계 · 금융 구조도")
     st.caption("사모사채 개요 바로 아래에 들어가는 **회사 금융 구조도** 를 만드는 단계입니다. 'IM 요약본' 도구와 똑같이, "
                "회사에서 쓰던 구조도 틀 중 비슷한 것을 고르고 회사 이름·금액만 채우면 됩니다. "
-               "원본에 있던 구조도 그림 줄은 결과에서 지웁니다. **구조도가 필요 없으면 건너뛰어도 됩니다**"
-               "(그러면 '금융 구조도' 제목도 넣지 않습니다).")
+               "원본에 있던 구조도 그림 줄은 결과에서 지웁니다. **구조도는 항상 들어갑니다** — "
+               "원본에 구조도가 없어도 하나 골라 주세요(고르기 전에는 다음 단계로 넘어갈 수 없습니다).")
     if not SS.get("cf_info"):
         st.warning("먼저 1단계에서 원본을 올려 주세요.")
     else:
@@ -378,14 +378,13 @@ elif step == 4:
         _no = SS.get("cf_dg_no")
         _d = next((x for x in _LAYOUTS if x["no"] == _no), None) if _no else None
         if not _d:
-            st.info("위에서 구조도를 하나 고르면 채울 항목이 나옵니다. 구조도가 필요 없으면 그냥 다음 단계로 넘어가세요.")
+            st.info("위에서 구조도를 하나 고르면 채울 항목이 나옵니다.")
         else:
             st.markdown("---")
             st.markdown(f"#### ② 항목 채우기 — {_d['title']}")
             st.caption("원본에서 찾은 값으로 미리 채워두었습니다. **틀린 것만 고치면 됩니다.** "
                        "미리보기는 없습니다 — 다 채우고 다음 단계로 넘어가면 '만들기' 때 구조도를 그려 넣습니다. "
-                       "이 딜에 없는 항목은 오른쪽 **빼기** 를 체크하세요(그림에서 상자째 사라집니다). "
-                       "비워두고 넘어가도 됩니다.")
+                       "이 딜에 없는 항목은 오른쪽 **빼기** 를 체크하세요(그림에서 상자째 사라집니다).")
 
             def _g(k):
                 return (SS.get(f"cf_dg_{k}") or "").strip()
@@ -416,15 +415,18 @@ elif step == 4:
                                            help="이 항목을 그림에서 아예 없앱니다")
 
 
-        st.success(f"구조도 '{_d['title']}' 을(를) 골랐습니다 — **5단계 '만들기' 를 누를 때 지금 채운 값으로 만들어** "
-                   "사모사채 개요 아래에 넣습니다." if _d else
-                   "구조도를 고르지 않았습니다. 필요 없으면 그냥 넘어가세요(구조도 없이 만듭니다).")
+        if _d:
+            st.success(f"구조도 '{_d['title']}' 을(를) 골랐습니다 — **5단계 '만들기' 를 누를 때 지금 채운 값으로 만들어** "
+                       "'금융 개요 > 1. 금융 구조도' 자리에 넣습니다.")
+        else:
+            st.warning("아직 구조도를 고르지 않았습니다. 구조도는 항상 들어가므로 위에서 하나 골라야 다음 단계로 갈 수 있습니다.")
 
     st.markdown("---")
     p1, _sp, p3 = st.columns([2, 4, 2])
     if p1.button("← 이전 단계", use_container_width=True, key="w_cf_prev_3"):
         _goto(3)
-    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True, key="w_cf_next_5"):
+    if SS.get("cf_info") and p3.button("다음 단계 →", type="primary", use_container_width=True, key="w_cf_next_5",
+                                       disabled=not SS.get("cf_dg_no"), help="구조도를 하나 골라야 넘어갈 수 있습니다"):
         _goto(5)
 
 
@@ -509,6 +511,8 @@ elif step == 5:
 
         if not engine.template_path():
             st.error("회사 양식 파일(양식\\회사양식_틀.docx)을 찾지 못해 만들 수 없습니다. 관리자에게 알려 주세요.")
+        elif not SS.get("cf_dg_no"):
+            st.warning("4단계에서 금융 구조도를 아직 고르지 않았습니다. 구조도는 항상 들어가므로 4단계로 돌아가 하나 골라 주세요.")
         elif st.button("📝 회사 양식 워드 만들기", type="primary"):
             for k in ("cf_out", "cf_rep", "cf_build_err", "cf_diag_err"):
                 SS.pop(k, None)

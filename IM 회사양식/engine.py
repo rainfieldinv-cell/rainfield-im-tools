@@ -441,7 +441,7 @@ def _bond_heading_from_original(doc):
             continue
         new = copy.deepcopy(tbl)
         n0, n1 = new.findall(qn("w:tr"))[0].findall(qn("w:tc"))
-        txt = _num_text(kind, num, v - 1)
+        txt = _num_text(kind, num, max(v - 1, 1))
         _set_cell_text(n0, txt if txt is not None else "")
         _set_cell_text(n1, "사모사채 개요")
         return new
@@ -460,7 +460,7 @@ def _bond_heading_from_original(doc):
         for ch in list(new)[idx + 1:]:                       # 제목 뒤(줄바꿈·다음 소제목)는 버린다
             new.remove(ch)
         nruns = [r for r in new.findall(qn("w:r")) if r.find(qn("w:t")) is not None]
-        txt = _num_text(kind, num, v - 1)
+        txt = _num_text(kind, num, max(v - 1, 1))
         # 번호가 든 조각만 바꾸고, 번호 뒤 칠한 빈칸(상자 여백)은 원본 그대로 둔다
         for r in nruns[:len(shaded)]:
             for t in r.findall(qn("w:t")):
@@ -477,33 +477,14 @@ def _bond_heading_from_original(doc):
         for sp in new.iter(qn("w:sectPr")):
             sp.getparent().remove(sp)
         return new
-    best = None                                              # (글자 크기, 종류, 문단, 매치)
-    found = {}
-    for p in body.findall(qn("w:p")):
-        txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
-        if not txt.strip() or len(txt.strip()) > 40:
-            continue
-        for kind, rx in _HEAD_PATTERNS:
-            m = rx.match(txt)
-            if not m or not m.group(2):
-                continue
-            v = _num_value(kind, m.group(2))
-            if v is None or v <= 0:
-                continue
-            szs = [int(s.get(qn("w:val"))) for s in p.iter(qn("w:sz")) if (s.get(qn("w:val")) or "").isdigit()]
-            sz = max(szs) if szs else 20
-            found.setdefault(kind, []).append((sz, p, m, v))
-            break
-    cands = [(max(x[0] for x in lst), kind, lst) for kind, lst in found.items() if len(lst) >= 2]
-    if not cands:
+    lv = _level(_para_heads(doc))                            # 대단원 무리의 첫 제목 모양
+    if not lv:
         return None
-    sz, kind, lst = max(cands, key=lambda c: c[0])
-    first = next(x for x in lst if x[0] >= sz - 1)           # 가장 큰 글자 무리의 첫 제목 = 원본 첫 대단원
-    _, p, m, v = first
+    _, kind, p, m = lv[0]
+    v = _num_value(kind, m.group(2))
     new = copy.deepcopy(p)
-    numtxt = _num_text(kind, m.group(2), v - 1)
-    text = (m.group(1) + numtxt + m.group(3) + "사모사채 개요") if numtxt is not None else "사모사채 개요"
-    _set_par_text(new, text)
+    numtxt = _num_text(kind, m.group(2), max(v - 1, 1))
+    _set_heading_text(new, m.end(3), m.group(1) + numtxt + m.group(3), "사모사채 개요")
     for sp in new.iter(qn("w:sectPr")):
         sp.getparent().remove(sp)
     return new
@@ -671,14 +652,26 @@ def drop_structure_rows(doc):
 
 
 def whiten_borders_to_black(doc):
-    """표 테두리 중 흰색(FFFFFF)만 검정으로(2026-10-13 사용자 확정). 다른 색은 그대로. 바꾼 수."""
+    """표 테두리 중 흰색(FFFFFF)을 그 표의 다른 테두리 색(가장 많이 쓴 색, 없으면 검정)으로. 다른 색은 그대로. 바꾼 수.
+    ★2026-10-14 사용자: '흰색 테두리는 없다 — 그 표의 다른 테두리와 같은 색으로'(10-13 엔 무조건 검정이었다)."""
+    from collections import Counter
     n = 0
-    for b in doc.element.body.iter(qn("w:tcBorders"), qn("w:tblBorders")):
-        for e in b:
-            col = (e.get(qn("w:color")) or "").lstrip("#").upper()
-            if col == "FFFFFF" and e.get(qn("w:val")) not in ("nil", "none"):
-                e.set(qn("w:color"), "000000")
-                n += 1
+    for tbl in doc.element.body.iter(qn("w:tbl")):
+        own = [b for b in tbl.iter(qn("w:tcBorders"), qn("w:tblBorders"))
+               if next(b.iterancestors(qn("w:tbl")), None) is tbl]
+        cnt = Counter()
+        for b in own:
+            for e in b:
+                col = (e.get(qn("w:color")) or "").lstrip("#").upper()
+                if e.get(qn("w:val")) not in ("nil", "none", None) and col not in ("", "AUTO", "FFFFFF"):
+                    cnt[col] += 1
+        to = cnt.most_common(1)[0][0] if cnt else "000000"
+        for b in own:
+            for e in b:
+                col = (e.get(qn("w:color")) or "").lstrip("#").upper()
+                if col == "FFFFFF" and e.get(qn("w:val")) not in ("nil", "none"):
+                    e.set(qn("w:color"), to)
+                    n += 1
     return n
 
 
@@ -834,7 +827,22 @@ def paint_headers(doc):
                     if f != NAVY or i in head:
                         _paint_navy(tc)
                         n += 1
+    # 남색·진파랑 칸은 표 안의 표까지 전부 정확히 회사 네이비로(2026-10-14 사용자: '비슷한 남색이어도 17365D 로')
+    for tc in body.iter(qn("w:tc")):
+        f = _fill(tc)
+        if f and f != NAVY and _navy_like(f):
+            _paint_navy(tc)
+            n += 1
     return n
+
+
+def _navy_like(hexs):
+    """남색·진파랑(파랑이 가장 세고 어두운 색)인가."""
+    try:
+        r, g, b = (int(hexs[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception:
+        return False
+    return b >= r + 30 and b >= g and _lum(hexs) < 0.42
 
 
 # ──────────────────────────────────────────────
@@ -1516,35 +1524,15 @@ def read_bond_defaults(tpl_path=None):
 
 
 def _sub_heading_from_original(doc):
-    """원본 '대단원 아래 소제목' 문단(예: '1. 본건 대출 금융조건', '(1) …') — 가장 큰 번호 문단 무리 다음 크기 무리의 첫 문단.
-    번호 상자식 대단원이 있으면 번호 문단 중 가장 큰 무리가 소제목이다. (문단, 종류, 매치) 또는 None."""
-    body = doc.element.body
-    boxes = False
-    for tbl in body.findall(qn("w:tbl")):
-        row, _ = _heading_row(tbl)
-        if row is not None and len(row.findall(qn("w:tc"))) == 2:
-            num = "".join(t.text or "" for t in row.findall(qn("w:tc"))[0].iter(qn("w:t"))).strip()
-            if _SEC_NO_RE.fullmatch(num or "x"):
-                boxes = True
-                break
-    found = []
-    for p in body.findall(qn("w:p")):
-        txt = "".join(t.text or "" for t in p.iter(qn("w:t")))
-        if not txt.strip() or len(txt.strip()) > 40:
-            continue
-        for kind, rx in _HEAD_PATTERNS:
-            m = rx.match(txt)
-            if m and m.group(2) and _num_value(kind, m.group(2)):
-                szs = [int(x.get(qn("w:val"))) for x in p.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()]
-                found.append((max(szs) if szs else 20, kind, p, m))
-                break
-    if not found:
+    """원본 '대단원 아래 소제목' 문단(예: '1. 본건 대출 금융조건') — 대단원 무리를 뺀 번호 문단 중 가장 큰 글자의 번호 모양 무리의 첫 문단.
+    번호 상자식 대단원이면 번호 문단 중 가장 큰 무리가 소제목. (문단, 종류, 매치) 또는 None."""
+    found = _para_heads(doc)
+    majors = [h["el"] for h in _major_headings(doc) if not h["box"]]
+    lv = _level(found, exclude=majors)
+    if not lv:
         return None
-    sizes = sorted({f[0] for f in found}, reverse=True)
-    if not boxes and len(sizes) > 1:
-        sizes = sizes[1:]                                    # 가장 큰 무리는 대단원
-    top = sizes[0]
-    return next(((p, kind, m) for sz, kind, p, m in found if sz == top), None)
+    sz, kind, p, m = lv[0]
+    return p, kind, m
 
 
 def _make_sub_heading(src, n, title):
@@ -1721,6 +1709,44 @@ def _page_no_size(root):
                 e.set(qn("w:val"), str(PAGE_NO_SZ))
 
 
+def apply_company_geometry(doc):
+    """모든 구역(표지·개요·본문·연락처) 규격을 같게 + 머리말·꼬리말 가로 선을 본문 폭 그대로.
+    ★양식 머리말·꼬리말 선은 고정 폭(16cm) 네모 — 규격을 바꾸면 선 길이가 본문과 안 맞는다(내곡동 6쪽 비뚤어짐)."""
+    import pdf_input as _pi
+    from docx.shared import Cm
+    for sec in doc.sections:
+        sec.page_width, sec.page_height = Cm(_pi.PAGE_W), Cm(_pi.PAGE_H)
+        sec.top_margin, sec.bottom_margin = Cm(_pi.TOP_CM), Cm(_pi.BOTTOM_CM)
+        sec.left_margin, sec.right_margin = Cm(_pi.LEFT_CM), Cm(_pi.RIGHT_CM)
+        sec.header_distance, sec.footer_distance = Cm(_pi.HEADER_CM), Cm(_pi.FOOTER_CM)
+        for t in sec._sectPr.findall(qn("w:pgMar")):
+            t.set(qn("w:gutter"), "0")
+    body_emu = int(round(_pi.BOX_W_PT * 12700))
+    WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+    A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    seen = set()
+    for sec in doc.sections:
+        for hf in (sec.header, sec.footer):
+            el = hf._element
+            if id(hf.part) in seen:
+                continue
+            seen.add(id(hf.part))
+            for anc in el.iter(WP + "anchor"):
+                ext = anc.find(WP + "extent")
+                if ext is None:
+                    continue
+                cx, cy = int(ext.get("cx")), int(ext.get("cy"))
+                if cy < 100000 and cx > 3000000:                 # 가로 선(얇고 긴 네모)
+                    ext.set("cx", str(body_emu))
+                    ph = anc.find(WP + "positionH")
+                    off = ph.find(WP + "posOffset") if ph is not None else None
+                    if off is not None:
+                        off.text = "0"
+                    for x in anc.iter(A + "ext"):
+                        if x.getparent().tag == A + "xfrm":
+                            x.set("cx", str(body_emu))
+
+
 def _renumber_shapes(doc):
     """그림·도형 번호(wp:docPr id)를 문서 전체에서 겹치지 않게 다시 매긴다.
 
@@ -1842,6 +1868,369 @@ def _place_bond(doc, tpl, bond_els, place):
             sp.addprevious(el)
 
 
+def _vis_text(el):
+    return "".join(t.text or "" for t in el.iter(qn("w:t")))
+
+
+def _set_heading_text(p, head_len, new_head, title):
+    """번호 문단 글 바꾸기 — 원본 글 앞 head_len 글자(번호+띄움)가 따로 된 글 조각이면 번호 조각·제목 조각 서식을 각각 살린다.
+    ★예전엔 글 전체를 첫 조각(번호 조각)에 넣어 제목 글꼴·굵기가 원본과 달라졌다('본건 사모사채 개요', 2026-10-14)."""
+    ts = [t for t in p.iter(qn("w:t"))]
+    pos, cut = 0, None
+    for k, t in enumerate(ts):
+        pos += len(t.text or "")
+        if pos == head_len:
+            cut = k
+            break
+        if pos > head_len:
+            break
+    if cut is None or cut + 1 >= len(ts) or not new_head:
+        _set_par_text(p, (new_head or "") + title)
+        return
+    for t in ts:
+        t.text = ""
+    ts[0].text = new_head
+    ts[cut + 1].text = title
+    for t in (ts[0], ts[cut + 1]):
+        t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def _head_match(txt):
+    """번호 제목 글이면 (종류, 매치), 아니면 None."""
+    if not txt.strip() or len(txt.strip()) > 40:
+        return None
+    for kind, rx in _HEAD_PATTERNS:
+        m = rx.match(txt)
+        if m and m.group(2) and _num_value(kind, m.group(2)) is not None:
+            return kind, m
+    return None
+
+
+def _max_sz(el):
+    szs = [int(x.get(qn("w:val"))) for x in el.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()]
+    return max(szs) if szs else 20
+
+
+def split_heading_breaks(doc):
+    """'Ⅱ.금융조건 ↵ 1.주요 금융 조건' 처럼 줄바꿈으로 한 문단에 붙은 제목들을 문단 하나씩으로 나눈다.
+    ★pdf2docx 가 대단원과 소제목을 한 문단에 넣어 대단원을 못 찾았다(내곡동, 2026-10-15). 나눈 문단 수."""
+    n = 0
+    body = doc.element.body
+    for p in list(body.findall(qn("w:p"))):
+        if not any(br.get(qn("w:type")) in (None, "textWrapping") for br in p.iter(qn("w:br"))):
+            continue
+        segs, cur, part = [], [], None
+        for ch in p:
+            if ch.tag == qn("w:pPr"):
+                continue
+            if ch.tag != qn("w:r"):
+                cur.append(copy.deepcopy(ch))
+                continue
+            rpr = ch.find(qn("w:rPr"))
+            part = None
+            for c in ch:
+                if c.tag == qn("w:rPr"):
+                    continue
+                if c.tag == qn("w:br") and c.get(qn("w:type")) in (None, "textWrapping"):
+                    segs.append(cur)
+                    cur, part = [], None
+                    continue
+                if part is None:
+                    part = ch.makeelement(qn("w:r"), {})
+                    if rpr is not None:
+                        part.append(copy.deepcopy(rpr))
+                    cur.append(part)
+                part.append(copy.deepcopy(c))
+        segs.append(cur)
+        texts = ["".join(t.text or "" for s in seg for t in s.iter(qn("w:t"))) for seg in segs]
+        if len(segs) < 2 or _head_match(texts[0]) is None:
+            continue
+        ppr = p.find(qn("w:pPr"))
+        made = []
+        for seg, txt in zip(segs[:-1], texts[:-1]):
+            if not txt.strip():
+                continue
+            np_ = p.makeelement(qn("w:p"), {})
+            if ppr is not None:
+                c = copy.deepcopy(ppr)
+                for sp in c.findall(qn("w:sectPr")):
+                    c.remove(sp)
+                np_.append(c)
+            for x in seg:
+                np_.append(x)
+            p.addprevious(np_)
+            made.append(np_)
+            n += 1
+        for ch in [c for c in p if c.tag != qn("w:pPr")]:
+            p.remove(ch)
+        for x in segs[-1]:
+            p.append(x)
+        for q in [p] + made:
+            _left_heading(q)
+    for f in _para_heads(doc):                               # 제목 번호 뒤 띄어쓰기(원본 'II. 금융조건', pdf2docx 가 빼먹음)
+        _space_after_number(f[2], f[3])
+    return n
+
+
+def _left_heading(p):
+    """pdf2docx 가 '가운데 맞춤 + 큰 오른쪽 들여쓰기' 로 왼쪽 자리를 흉내 낸 제목 → 왼쪽 맞춤, 들여쓰기 0(원본 자리)."""
+    ppr = p.find(qn("w:pPr"))
+    if ppr is None:
+        return
+    jc = ppr.find(qn("w:jc"))
+    ind = ppr.find(qn("w:ind"))
+    try:
+        right = int(float(ind.get(qn("w:right")) or 0)) if ind is not None else 0
+    except ValueError:
+        right = 0
+    if jc is not None and jc.get(qn("w:val")) == "center" and right > 1500:
+        jc.set(qn("w:val"), "left")
+        ind.set(qn("w:right"), "0")
+        ind.set(qn("w:left"), "0")
+
+
+def _space_after_number(p, m):
+    """번호 바로 뒤에 띄어쓰기가 없으면 한 칸('2.자금조달' → '2. 자금조달')."""
+    if m.group(3) and m.group(3)[-1].isspace():
+        return
+    head_len = m.end(3)
+    pos = 0
+    for t in p.iter(qn("w:t")):
+        L = len(t.text or "")
+        if pos + L >= head_len:
+            k = head_len - pos
+            t.text = (t.text or "")[:k] + " " + (t.text or "")[k:]
+            t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            return
+        pos += L
+
+
+def _para_heads(doc):
+    """맨 바깥 번호 제목 문단 [(크기, 종류, 문단, 매치)] 문서 순서."""
+    out = []
+    for p in doc.element.body.findall(qn("w:p")):
+        hm = _head_match(_vis_text(p))
+        if hm:
+            out.append((_max_sz(p), hm[0], p, hm[1]))
+    return out
+
+
+def _level(found, exclude=()):
+    """가장 큰 글자 제목의 번호 종류 무리(그 종류 중 가장 큰 글자의 85% 이상). [(크기, 종류, 문단, 매치)]
+    ★쪽마다 줄인 비율이 달라 같은 대단원도 13.5~15.5pt 로 제각각 — 글자 크기 하나로 묶으면 안 된다(내곡동)."""
+    rest = [f for f in found if f[2] not in exclude]
+    if not rest:
+        return []
+    top = max(rest, key=lambda f: f[0])
+    kind = top[1]
+    lim = top[0] * 0.85
+    return [f for f in rest if f[1] == kind and f[0] >= lim]
+
+
+def _major_headings(doc):
+    """원본 대단원 제목 목록(문서 순서). [{el, box, kind, tok, title, m}]
+    번호 상자 표(1줄 2칸, 칠한 번호 칸)가 있으면 그것들, 없으면 가장 큰 글자 번호 문단 무리(2개 이상)."""
+    body = doc.element.body
+    boxes = []
+    for el in body:
+        if el.tag != qn("w:tbl"):
+            continue
+        row, _ = _heading_row(el)
+        if row is None or len(el.findall(qn("w:tr"))) != 1:
+            continue
+        tcs = row.findall(qn("w:tc"))
+        if len(tcs) != 2:
+            continue
+        num = _vis_text(tcs[0]).strip().rstrip(".")
+        title = _vis_text(tcs[1]).strip()
+        if num and re.match(re.escape(num) + r"\.?\s*[^\d\s.]", title):   # 제목 칸에도 번호가 겹쳐 들어온 것(돈암 '1 Executive summary', '3사업개요')
+            title = re.sub("^" + re.escape(num) + r"\.?\s*", "", title)
+        if _SEC_NO_RE.fullmatch(num or "x") and title and len(title) <= 40 and _fill(tcs[0]):
+            boxes.append({"el": el, "box": True, "kind": "digit" if num.isdigit() else "roman", "tok": num,
+                          "title": title, "m": None})
+    if boxes:
+        return boxes
+    return [{"el": p, "box": False, "kind": kind, "tok": m.group(2), "title": m.group(4).strip(), "m": m}
+            for sz, kind, p, m in _level(_para_heads(doc))]
+
+
+def _fmt_num(kind, tok, v):
+    if kind == "roman":
+        return (_ROMAN if tok.strip() in _ROMAN else _ROMAN_ASCII)[min(v, 12)]
+    return f"{v:0{len(tok)}d}" if tok.startswith("0") else str(v)
+
+
+def _set_major(h, v=None, title=None):
+    """대단원 제목 번호·이름 바꾸기. v=None 이면 번호 없이 제목만(상자식은 번호 칸을 빼고 제목 칸을 넓힌다)."""
+    title = h["title"] if title is None else title
+    el = h["el"]
+    if h["box"]:
+        tr = el.find(qn("w:tr"))
+        c0, c1 = tr.findall(qn("w:tc"))
+        if v is None:
+            w0 = c0.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            w1 = c1.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            try:
+                w1.set(qn("w:w"), str(int(float(w1.get(qn("w:w")))) + int(float(w0.get(qn("w:w"))))))
+            except (AttributeError, TypeError, ValueError):
+                pass
+            grid = el.find(qn("w:tblGrid"))
+            cols = grid.findall(qn("w:gridCol")) if grid is not None else []
+            if len(cols) >= 2:
+                cols[1].set(qn("w:w"), str(int(float(cols[0].get(qn("w:w")) or 0)) + int(float(cols[1].get(qn("w:w")) or 0))))
+                grid.remove(cols[0])
+            tr.remove(c0)
+        else:
+            _set_cell_text(c0, _fmt_num(h["kind"], h["tok"], v))
+        p = next((pp for pp in c1.iter(qn("w:p")) if _vis_text(pp).strip()), None)
+        if p is not None:
+            _set_visible_text(p, title)
+        return
+    m = h["m"]
+    head = "" if v is None else m.group(1) + _fmt_num(h["kind"], m.group(2), v) + m.group(3)
+    _set_heading_text(el, m.end(3), head, title)
+
+
+def _sub_headings_between(doc, start_el, end_el, src):
+    """두 대단원 사이 소제목 문단(원본 소제목과 같은 번호 모양, 글자 크기 85% 이상). [(p, kind, m)]"""
+    if src is None:
+        return []
+    p0, kind0, m0 = src
+    sz0 = _max_sz(p0)
+    out = []
+    el = start_el.getnext()
+    while el is not None and el is not end_el:
+        if el.tag == qn("w:p"):
+            hm = _head_match(_vis_text(el))
+            if hm and hm[0] == kind0 and _max_sz(el) >= sz0 * 0.85:
+                out.append((el, hm[0], hm[1]))
+        el = el.getnext()
+    return out
+
+
+def _diagram_par(doc, diagram_png):
+    from docx.shared import Cm
+    import pdf_input as _pi
+    w = min(Cm(16.0), int(_pi.BOX_W_PT * 12700))
+    inline = doc.part.new_pic_inline(io.BytesIO(diagram_png), w, None)
+    p = etree.Element(qn("w:p"))
+    ppr = etree.SubElement(p, qn("w:pPr"))
+    etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "120", qn("w:after"): "120"})
+    etree.SubElement(ppr, qn("w:jc"), {qn("w:val"): "center"})
+    r = etree.SubElement(p, qn("w:r"))
+    etree.SubElement(r, qn("w:drawing")).append(inline)
+    return p
+
+
+def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlight):
+    """대단원 순서·번호를 회사 순서로(2026-10-14 사용자 확정).
+      [원본 하이라이트 대단원 — 번호 없이 글자만]
+      Ⅰ. 사모사채 개요  > 1. 본건 사모사채 개요(+표)              ← bond_head ~ bond_last (이미 넣어 둠)
+      Ⅱ. 금융 개요      > 1. 금융 구조도(그림) > 2. 본건 기초자산 금융조건(원본 금융조건) > 3. …(원본 다음 소제목들)
+      Ⅲ. … 원본 나머지 대단원 차례대로 다시 번호.
+    번호 모양·글꼴·크기는 원본 대단원·소제목 것. 보고 dict."""
+    rep = {}
+    heads = _major_headings(doc)
+    if not heads:                                           # 대단원을 못 찾으면 개요 표 뒤에 '2. 금융 구조도' + 그림
+        last = bond_last
+        s2 = _make_sub_heading(sub, 2, "금융 구조도")
+        last.addnext(s2)
+        if diagram_png:
+            s2.addnext(_diagram_par(doc, diagram_png))
+        rep["대단원"] = "못 찾음"
+        return rep
+    body = doc.element.body
+
+    def pos(el):
+        return body.index(el) if el.getparent() is body else -1
+    bond_last = bond_els[-1]
+    bpos = pos(bond_head)
+    hl = None
+    if has_highlight:
+        import pdf_input as _pi
+        # 하이라이트 제목 = 개요 앞에서 마지막으로 나온 '하이라이트 말(Executive Summary 등)' 짧은 줄(번호 있든 없든)
+        anchor = None
+        for el in body:
+            if pos(el) >= bpos:
+                break
+            t = _vis_text(el).strip()
+            if t and len(t) <= 40 and _pi.HIGHLIGHT_RE.search(t):
+                anchor = el
+        if anchor is not None:
+            apos = pos(anchor)
+            between = [h for h in heads if apos < pos(h["el"]) < bpos]
+            if between:
+                # ★하이라이트와 다음 대단원이 한 쪽에 같이 있다(대전 '1 Executive Summary'+'2 금융개요',
+                #   등촌 '■ Executive Summary'+'1. 주요금융조건') → 개요를 그 쪽 뒤가 아니라 다음 대단원 바로 앞에(2026-10-15)
+                target = between[0]["el"]
+                left = bond_els[-1].getnext()                  # 개요 뒤 구역 나눔(새 쪽)만 남으면 빈 쪽이 된다 → 같이 뺀다
+                if left is not None and left.tag == qn("w:p") and not _vis_text(left).strip() and                         left.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None and                         left.find(".//" + qn("w:drawing")) is None:
+                    left.getparent().remove(left)
+                for el in bond_els:
+                    if el.getparent() is not None:
+                        target.addprevious(el)
+                rep["개요 옮김"] = f"'{between[0]['title']}' 앞으로"
+                bpos = pos(bond_head)
+            hl = next((h for h in heads if h["el"] is anchor), None)   # 번호 있는 대단원일 때만 번호를 뺀다
+    # 금융 대단원 = 개요 뒤 첫 금융 제목
+    fin = next((h for h in heads if pos(h["el"]) > bpos and _FIN_TITLE_RE.search(h["title"])), None)
+    style = next((h for h in heads if h["el"] is bond_head), None) or heads[0]
+    fin_els = []
+    if fin is None:                                         # 원본에 금융 대단원이 없다 → 개요 바로 뒤에 새로
+        new = copy.deepcopy(style["el"])
+        for sp in new.iter(qn("w:sectPr")):
+            sp.getparent().remove(sp)
+        bond_last.addnext(new)
+        nh = dict(style, el=new)
+        _set_major(nh, 1, "금융 개요")
+        heads = _major_headings(doc)
+        fin = next(h for h in heads if h["el"] is new)
+        rep["금융 대단원"] = "원본에 없어 새로"
+    else:
+        rep["금융 대단원"] = f"원본 '{fin['title']}' → 금융 개요"
+    fin["title"] = "금융 개요"
+    # 금융 대단원 안 소제목: 1. 금융 구조도, 2. 본건 기초자산 금융조건, 3.~ 원본 나머지
+    nxt = next((h["el"] for h in heads if pos(h["el"]) > pos(fin["el"])), None)
+    subs = _sub_headings_between(doc, fin["el"], nxt, sub)
+    anchor = fin["el"]
+    first_fin_sub = subs[0] if subs and _FIN_TITLE_RE.search(subs[0][2].group(4)) else None
+    s1 = _make_sub_heading(sub, 1, "금융 구조도")
+    anchor.addnext(s1)
+    fin_els.append(s1)
+    last = s1
+    if diagram_png:
+        dp = _diagram_par(doc, diagram_png)
+        last.addnext(dp)
+        last = dp
+    if first_fin_sub is None:                               # 원본 금융조건 소제목이 없으면 새로(원본 표 바로 위)
+        s2 = _make_sub_heading(sub, 2, FIN_TITLE)
+        last.addnext(s2)
+        rest = subs
+    else:
+        p, kind, m = first_fin_sub
+        _set_heading_text(p, m.end(3), m.group(1) + _fmt_num(kind, m.group(2), 2) + m.group(3), FIN_TITLE)
+        ind = p.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+        if ind is not None:
+            ind.set(qn("w:right"), "0")
+        rest = subs[1:]
+    for k, (p, kind, m) in enumerate(rest):
+        _set_heading_text(p, m.end(3), m.group(1) + _fmt_num(kind, m.group(2), k + 3) + m.group(3), m.group(4).strip())
+    rep["금융 소제목"] = 2 + len(rest)
+    # 대단원 번호 다시 매김
+    v = 0
+    for h in _major_headings(doc):
+        if hl is not None and h["el"] is hl["el"]:
+            _set_major(h, None)
+            continue
+        v += 1
+        title = "금융 개요" if h["el"] is fin["el"] else ("사모사채 개요" if h["el"] is bond_head else None)
+        _set_major(h, v, title)
+    rep["대단원"] = v
+    rep["하이라이트 번호 뺌"] = hl["title"] if hl else "없음"
+    return rep
+
+
+
 def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_place=None, tpl_path=None,
           diagram_png=None):
     """(PDF 에서 만든) 본문 워드 bytes → 회사양식 워드 bytes, 보고(dict).
@@ -1855,6 +2244,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep = {}
 
     apply_fonts(doc)
+    rep["제목 줄 나눔"] = split_heading_breaks(doc)
     rep["머리글 칸"] = paint_headers(doc)
     rep["세로 가운데 칸"] = center_cells_vertically(doc)
     rep["대단원 제목 회사 모양"] = restyle_section_headings(doc) + restyle_shaded_number_headings(doc)
@@ -1872,24 +2262,27 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     bond_els = _build_bond_section(doc, bond)
     for el in bond_els:
         body.remove(el)
-    rep["금융 대단원 제목 바꿈"] = rename_finance_headings(doc)   # 개요 제목(원본 첫 대단원 복사)을 만든 뒤에
     rep["흰 테두리 검정"] = whiten_borders_to_black(doc)
     rep["원본 구조도 줄 지움"] = drop_structure_rows(doc)
     sub = _sub_heading_from_original(doc)
-    tpl_bond = _template_bond_els(tpl, doc, bond, diagram_png, sub)   # 양식(최종) 표 + 금융 구조도
+    tpl_bond = _template_bond_els(tpl, doc, bond, None, sub)   # 양식(최종) 사모사채 개요 표(구조도는 금융 개요 아래로)
+    # ★2026-10-14 사용자 확정: 대단원 'Ⅰ. 사모사채 개요'(원본 대단원 모양) > 소제목 '1. 본건 사모사채 개요'(원본 소제목 모양) > 표
     if tpl_bond:
-        # ★2026-10-14 사용자 확정: 사모사채 개요는 대단원(번호 상자)이 아니라 원본 소제목 모양 '1. 본건 사모사채 개요',
-        #   그 아래 같은 모양 '2. 금융 구조도'. (하이라이트 다음인데 '0' 이 붙어 이상했다)
         bond_els = [_make_sub_heading(sub, 1, "본건 사모사채 개요")] + tpl_bond
         rep["개요 제목"] = "원본 소제목 모양" if sub is not None else "기본 모양(원본 소제목 못 찾음)"
-    if not tpl_bond:                                        # 양식에서 개요 표를 못 찾았을 때만 옛 방식
+    else:                                                   # 양식에서 개요 표를 못 찾았을 때만 옛 방식
         _set_par_text(bond_els[0], "본건 사모사채 개요")
         rep["개요 제목"] = "양식 표 못 찾음"
-    if bond_place is not None and bond_place[1]:
-        h = bond_els[0]                                     # 같은 쪽에 이을 때는 위와 조금 띄운다
-        ppr = _first_child(h, "pPr")
-        _put(ppr, ppr.makeelement(qn("w:spacing"), {qn("w:before"): "480", qn("w:after"): "200"}))
+    if head is not None:
+        bond_els = [head] + bond_els
+    if bond_place is not None and bond_place[1]:            # 같은 쪽에 이을 때는 위와 조금 띄운다
+        gap = etree.Element(qn("w:p"))
+        etree.SubElement(etree.SubElement(gap, qn("w:pPr")), qn("w:spacing"),
+                         {qn("w:before"): "240", qn("w:after"): "0"})
+        bond_els = [gap] + bond_els
     _place_bond(doc, tpl, bond_els, bond_place)
+    bond_head = head if head is not None else bond_els[-len(tpl_bond or [None]) - 1]
+    rep.update(restructure_sections(doc, bond_els, bond_head, sub, diagram_png, bond_place is not None))
     rep["개요 자리"] = ("표지 다음 쪽" if bond_place is None else
                       f"하이라이트 뒤 {'같은 쪽에 이어서' if bond_place[1] else '새 쪽'}")
 
@@ -1953,6 +2346,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     if eo is not None:
         st.remove(eo)
 
+    apply_company_geometry(doc)
     _renumber_shapes(doc)
 
     out = io.BytesIO()

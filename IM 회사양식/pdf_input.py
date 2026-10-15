@@ -33,16 +33,19 @@ PAGE_W, PAGE_H = 21.0, 29.7
 # ★양식(최종) 파일의 값 그대로(twips → cm): 위 1701·아래 1440·왼 1440·오른 1440·머리말 975·꼬리말 697.
 #   예전엔 2.5/1.7 로 어림해 표지·개요 쪽(양식 구역)과 본문 쪽의 머리말 자리·폭이 조금씩 달랐다(2026-10-14 사용자 지적).
 _TW = 2.54 / 1440
-MIN_SZ = 16          # 본문 글자 최소 크기(반 pt 단위) = 8pt
-TOP_CM, BOTTOM_CM, LEFT_CM, RIGHT_CM = 1701 * _TW, 1440 * _TW, 1440 * _TW, 1440 * _TW
-HEADER_CM, FOOTER_CM = 975 * _TW, 697 * _TW
+MIN_SZ = 18          # 본문 글자 크기(반 pt 단위) = 9pt — 2026-10-14 사용자 확정 '본문 내용은 9'
+# ★규격 = 내곡동 원본 규격(2026-10-14 사용자 확정): 원본 실측 본문 폭 516pt(42.5~558.5), 본문 아래 끝 784pt,
+#   머리말 글 37pt·머리말 선 80pt, 쪽번호 794pt. 좌우 여백은 같게(사용자 '가로 여백 같게').
+LEFT_CM = RIGHT_CM = (21.0 - 516 / 72 * 2.54) / 2          # ≈1.40cm
+TOP_CM, BOTTOM_CM = 2.85, 2.05
+HEADER_CM, FOOTER_CM = 1.30, 1.10
 BOX_W_PT = (PAGE_W - LEFT_CM - RIGHT_CM) / 2.54 * 72        # 본문 칸 가로(pt)
 BOX_H_PT = (PAGE_H - TOP_CM - BOTTOM_CM) / 2.54 * 72        # 본문 칸 세로(pt)
 HEIGHT_SAFETY = 0.89  # 글꼴이 Pretendard 로 바뀌면 줄이 조금 높아진다 → 세로는 8% 여유(5% 로는 등촌역 쪽 몇 개가 넘쳤다)
 
 PAGE_NO_RE = re.compile(r"[-–\s]*(?:page\s*)?\d{1,3}(?:\s*(?:/|of)\s*\d{1,3})?[-–\s]*", re.I)
 HIGHLIGHT_RE = re.compile(r"executive\s*summary|investment\s*highlight|투자\s*하이라이트|투자\s*포인트|"
-                          r"핵심\s*요약|하이라이트|highlights?", re.I)
+                          r"핵심\s*요약|하이라이트|highlights?|overview", re.I)   # 신촌: 'OVERVIEW'
 
 
 # ──────────────────────────────────────────────
@@ -89,7 +92,10 @@ def find_highlight_pages(pdf_bytes):
     하이라이트와 본문이 한 쪽에 섞인 쪽은 넣지 않는다(그 쪽은 convert 가 하이라이트 부분만 지운다)."""
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     hits = []
+    toc = set(find_toc_pages(doc))                           # 목차 쪽은 하이라이트 아님(목차에 'Highlight' 글이 있다)
     for i in range(1, min(doc.page_count, 7)):
+        if i in toc:
+            continue
         top = doc[i].get_text("text", clip=fitz.Rect(0, 0, doc[i].rect.width, doc[i].rect.height * 0.35))
         if HIGHLIGHT_RE.search(top):
             hits.append(i + 1)
@@ -99,6 +105,31 @@ def find_highlight_pages(pdf_bytes):
 
 
 BOND_NEED_PT = 270    # 사모사채 개요(제목 + 9줄 표)에 드는 높이 어림(약 9.5cm)
+
+
+_TOC_RE = re.compile(r"(목\s*차|차\s*례|contents|table\s*of\s*contents|index)", re.I)
+
+
+def find_toc_pages(doc):
+    """앞쪽(표지 포함 6쪽 안)에서 목차·차례 쪽(0부터). 쪽 위쪽 절반에 '목차/차례/Contents' 만 적힌 줄이 있고,
+    쪽 글이 짧은 줄 위주(목차 항목)인 쪽."""
+    out = []
+    for i in range(min(6, doc.page_count)):
+        pg = doc[i]
+        lines = []
+        for b in pg.get_text("dict")["blocks"]:
+            for l in b.get("lines", []):
+                t = re.sub(r"\s+", " ", "".join(s["text"] for s in l["spans"])).strip()
+                if t:
+                    lines.append((l["bbox"][1], t))
+        hit = any(y < pg.rect.height * 0.5 and _TOC_RE.fullmatch(t.strip(" .:·-|")) for y, t in lines)
+        if not hit:
+            continue
+        # 목차 항목 = 점선(....)으로 쪽번호까지 이은 줄. 그런 줄이 있거나 쪽 글 줄이 적으면 목차 쪽
+        leaders = sum(1 for _, t in lines if re.search(r"(\.\s?){5,}|…{2,}|·{5,}", t))
+        if leaders >= 2 or len(lines) <= 30:
+            out.append(i)
+    return out
 
 
 def bond_place(rep, highlight_pages):
@@ -416,14 +447,122 @@ def strip_contacts(page):
     return True
 
 
+_CHART_DEBUG = False
+
+
+def find_charts(page):
+    """선·막대로 그린 차트 자리(fitz.Rect 목록). ★pdf2docx 는 차트의 막대·꺾은선을 못 옮겨 축 숫자만 흩어졌다
+    (내곡동 '(3) 월별 분양 추이', 2026-10-14 사용자 21번 '못 옮기는 차트는 원본 그 부분을 그림으로').
+    그림 묶음 중 비스듬한 선·곡선이 있거나, 기울어진 글(축 글)이 있거나, 바닥이 같은 막대가 여럿인 것."""
+    W, H = page.rect.width, page.rect.height
+    items = []
+    for dr in page.get_drawings():
+        r = dr["rect"]
+        if r.get_area() > W * H * 0.4 or r.y1 < H * TOP_BAND or r.y0 > H * (1 - BOTTOM_BAND):
+            continue
+        diag = curve = 0
+        for it in dr["items"]:
+            if it[0] == "l":
+                a, b = it[1], it[2]
+                if abs(a.x - b.x) > 1 and abs(a.y - b.y) > 1:
+                    diag += 1
+            elif it[0] == "c":
+                curve += 1
+        items.append((fitz.Rect(r), diag, curve, dr.get("fill") is not None))
+    if len(items) < 15:
+        return []
+    n = len(items)
+    par = list(range(n))
+
+    def f(a):
+        while par[a] != a:
+            par[a] = par[par[a]]
+            a = par[a]
+        return a
+    infl = [it[0] + (-6, -6, 6, 6) for it in items]
+    order = sorted(range(n), key=lambda i: infl[i].x0)
+    for ai, a in enumerate(order):
+        for b in order[ai + 1:]:
+            if infl[b].x0 > infl[a].x1:
+                break
+            if infl[a].intersects(infl[b]):
+                par[f(a)] = f(b)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(f(i), []).append(items[i])
+    rot = [fitz.Rect(l["bbox"]) for b in page.get_text("dict")["blocks"] for l in b.get("lines", [])
+           if l.get("dir") and abs(l["dir"][1]) > 0.2]
+    out = []
+    for g in groups.values():
+        if len(g) < 15:
+            continue
+        box = fitz.Rect(g[0][0])
+        for it in g[1:]:
+            box |= it[0]
+        if box.width < 80 or box.height < 50:
+            continue
+        diag = sum(it[1] for it in g)
+        curve = sum(it[2] for it in g)
+        nrot = sum(1 for r in rot if (box + (-20, -20, 20, 20)).intersects(r))
+        words = page.get_text("words", clip=box)
+        bars = [it[0] for it in g if it[3] and it[0].height > 3 and it[0].width < box.width * 0.2
+                and not any(fitz.Rect(w[:4]).intersects(it[0] + (-0.5, -0.5, 0.5, 0.5)) for w in words)]
+        base = {}
+        for r in bars:
+            base.setdefault(round(r.y1), []).append(r.height)
+        bar_ok = any(len(v) >= 5 and max(v) - min(v) > 5 for v in base.values())
+        try:
+            tabs = [fitz.Rect(t.bbox) for t in page.find_tables().tables]
+        except Exception:
+            tabs = []
+        in_tab = max(((box & t).get_area() / box.get_area() for t in tabs if t.intersects(box)), default=0)
+        if _CHART_DEBUG:
+            print("  chart?", [round(x) for x in box], "diag", diag, "curve", curve, "rot", nrot, "bar", bar_ok,
+                  "tab", round(in_tab, 2), "n", len(g))
+        # 표(선으로 칸이 나뉜 것)와 겹치면 차트로 안 본다 — 단 기울어진 축 글·막대가 있으면 차트
+        chars = "".join(w[4] for w in words)
+        chars = [c for c in chars if not c.isspace()]
+        digit = sum(1 for c in chars if c.isdigit() or c in ".,%()-~/년월") / max(1, len(chars))
+        if _CHART_DEBUG:
+            print("    digit", round(digit, 2), "chars", len(chars))
+        # 차트 글은 대부분 숫자(축 눈금·%·날짜) — 표·그림 설명(한글 많음)과 가른다
+        if in_tab < 0.5 and digit >= 0.55 and (nrot >= 3 or bar_ok or diag >= 4 or curve >= 24):
+            # 축·범례 글(바로 붙은 짧은 글)까지 넣는다
+            for b in page.get_text("dict")["blocks"]:
+                for l in b.get("lines", []):
+                    lr = fitz.Rect(l["bbox"])
+                    t = "".join(s["text"] for s in l["spans"]).strip()
+                    if t and len(t) <= 20 and (box + (-25, -18, 25, 18)).intersects(lr):
+                        box |= lr
+            out.append(box + (-2, -2, 2, 2))
+    return out
+
+
+def charts_to_images(page):
+    """차트 자리를 원본 그대로 그림으로 바꿔 넣는다(PDF 안에서). 바꾼 수."""
+    boxes = find_charts(page)
+    for box in boxes:
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), clip=box)
+        png = pix.tobytes("png")
+        page.add_redact_annot(box, fill=False)
+        _apply(page, images=True, graphics="covered", text=True)
+        page.insert_image(box, stream=png)
+    return len(boxes)
+
+
 def strip_band_logos(page):
     """위·아래 머리말 띠 안의 작은 그림(로고)을 지운다 — 한 쪽에만 있어도(되풀이 여부 상관없이)."""
     h, w = page.rect.height, page.rect.width
     n = 0
-    for info in page.get_image_info():
+    infos = page.get_image_info()
+    for info in infos:
         r = fitz.Rect(info["bbox"])
         in_band = r.y1 <= h * TOP_BAND or r.y0 >= h * (1 - BOTTOM_BAND)
-        if in_band and r.width < w * 0.35 and r.height < h * 0.10:
+        # ★더 큰 그림 위에 얹힌 작은 그림(평면도 위 '1F' 표시 등)은 로고가 아니다. 지우면 PDF 지우기가 겹친 큰 그림까지
+        #   통째로 지워 내곡동 52쪽 'B Type 평면도' 가 사라졌다(2026-10-15).
+        on_big = any(fitz.Rect(o["bbox"]).intersects(r) and fitz.Rect(o["bbox"]).get_area() > r.get_area() * 4
+                     for o in infos if o is not info)
+        if in_band and not on_big and r.width < w * 0.35 and r.height < h * 0.10:
             page.add_redact_annot(r + (-1, -1, 1, 1), fill=False)
             n += 1
     if n:
@@ -656,6 +795,12 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
         if 0 <= pg - 1 < n and (pg - 1) in keep and len(keep) > 1:
             keep.remove(pg - 1)
             rep["원본 하이라이트 뺀 쪽"].append(pg)
+    # 원본 목차·차례 쪽은 뺀다(2026-10-14 사용자 확정 — 대단원 번호가 바뀌어 원본 목차가 맞지 않는다)
+    rep["원본 목차 뺀 쪽"] = []
+    for i in find_toc_pages(doc):
+        if i in keep and len(keep) > 1:
+            keep.remove(i)
+            rep["원본 목차 뺀 쪽"].append(i + 1)
     rep["원본 끝쪽 뺌"], rep["원본 표지 뺌"] = bool(drop_last and n > 2), bool(drop_cover and n > 1)
     rep["그림 글씨 고침"] = fix_image_text(doc)
     # 하이라이트와 본문이 섞인 쪽(표지 다음 6쪽 안) → 하이라이트 부분만 지운다(회사 하이라이트 쪽으로 대체)
@@ -674,6 +819,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     # 원본 담당자 연락처(어느 쪽이든)·머리말 띠의 로고(한 쪽에만 있어도) — 2026-10-08 사용자 확정
     rep["연락처 지운 쪽"] = [i + 1 for i in keep if strip_contacts(doc[i])]
     rep["로고 지운 쪽"] = [i + 1 for i in keep if strip_band_logos(doc[i])]
+    rep["차트 그림으로 넣은 쪽"] = [i + 1 for i in keep if charts_to_images(doc[i])]
     boxes = [content_box(doc[i]) for i in range(n)]
     sizes = [(doc[i].rect.width, doc[i].rect.height) for i in range(n)]
     # 그림 조각이 아주 많은 쪽(성수동 15쪽 지도 = 조각 237개) 은 pdf2docx 가 한 쪽에 몇 분씩 걸린다 → 처음부터 쪽 그림으로
@@ -763,6 +909,17 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     # 망가진 '표 안의 표' 는 다른 손질 전에 원본 그림으로(손질 뒤엔 채운 칸이 늘어 멀쩡한 표까지 걸린다)
     _orig = fitz.open(stream=pdf_bytes, filetype="pdf")
     _done0 = [k for k in keep if k not in ignored]
+    # ★표는 원본 선·칠·글 자리로 다시 짠다(칸 합치기·안쪽 표까지 원본 그대로, 2026-10-15 사용자 22번 '가장 중요')
+    import table_rebuild
+    rep["원본 선으로 다시 짠 표"] = []
+    for (_secs, _grps), k in zip(_pages(d), _done0):
+        try:
+            got = table_rebuild.rebuild_page(doc[conv.index(k)], _grps, d.part)
+        except Exception as e:                                # 못 짜면 pdf2docx 표 그대로
+            logging.getLogger(__name__).warning("표 다시 짜기 실패 %s쪽: %s", k + 1, e)
+            got = []
+        if got:
+            rep["원본 선으로 다시 짠 표"].append((k + 1, len(got)))
     rep["망가진 안쪽 표 그림으로"] = []
     for (_secs, _grps), k in zip(_pages(d), _done0):
         if clean_broken_nested_tables(d, _grps):   # 2026-10-13 끔: 그림(색 안 바뀜)·다시 짜기(그림·글 빠짐) 둘 다 사용자 기준 미달
@@ -774,6 +931,12 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["줄 간격 글꼴 맞춤"] = match_line_spacing(d, font_lh)
     rep["글자 폭 원본 맞춤"] = match_char_width(d, width_ratio)
     rep["글머리 앞 줄바꿈"] = break_before_bullets(d)
+    rep["글머리 표 → 문단"] = bullet_tables_to_paragraphs(d)
+    rep["글머리 줄 문단 나눔"] = split_bullet_lines(d)
+    rep["글머리 내어쓰기"] = hang_bullets(d, width_ratio)
+    rep["표에서 온 글머리 위치 맞춤"] = align_table_bullets(d)
+    rep["글머리 다음 줄 맞춤"] = align_continuations(d)
+    rep["칸 좌우 여백 같게"] = even_cell_margins(d)
     rep["선만 있는 표 지움"] = drop_grid_tables(d)
     rep["칸 안 작은 표 풂"] = unwrap_cell_boxes(d)
     rep["쪼개진 표 합침"] = merge_split_tables(d)
@@ -1045,7 +1208,7 @@ def break_before_bullets(d):
         for r in list(p.iter(qn("w:r"))):
             for t in r.findall(qn("w:t")):
                 s = t.text or ""
-                if seen and s[:1] in LINE_BULLETS:
+                if seen and s and s[0] in LINE_BULLETS:           # ★빈 글('' in …)은 늘 참이라 빈 조각마다 줄바꿈이 들어갔다
                     prev = r.getprevious()
                     if not (prev is not None and prev.tag == qn("w:r") and prev.find(qn("w:br")) is not None):
                         br_r = r.makeelement(qn("w:r"), {})
@@ -1108,6 +1271,380 @@ def drop_grid_tables(d):
         if parent.tag == qn("w:tc") and len(parent.findall(qn("w:p"))) == 0:
             parent.append(parent.makeelement(qn("w:p"), {}))     # 칸엔 문단이 하나는 있어야 한다
         parent.remove(tbl)
+        n += 1
+    return n
+
+
+HANG_BULLETS = "•▪■□◦○●➢✓※▶▷◆◇◼◻-·∙ㆍ"
+
+
+def _par_text(p):
+    from docx.oxml.ns import qn
+    return "".join(t.text or "" for t in p.iter(qn("w:t")))
+
+
+def _ind_vals(p):
+    """(left, firstLine, hanging) twips."""
+    from docx.oxml.ns import qn
+    ind = p.find(f"{qn('w:pPr')}/{qn('w:ind')}")
+
+    def g(a):
+        v = ind.get(qn("w:" + a)) if ind is not None else None
+        return int(float(v)) if v and re.fullmatch(r"-?[\d.]+", v) else 0
+    return (g("left") or g("start")), g("firstLine"), g("hanging")
+
+
+def _set_ind(p, left, hanging=0, right=None):
+    from docx.oxml.ns import qn
+    ppr = p.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = p.makeelement(qn("w:pPr"), {})
+        p.insert(0, ppr)
+    ind = ppr.find(qn("w:ind"))
+    if ind is None:
+        ind = ppr.makeelement(qn("w:ind"), {})
+        after = next((ppr.find(qn(t)) for t in ("w:jc", "w:textAlignment", "w:outlineLvl", "w:rPr", "w:sectPr")
+                      if ppr.find(qn(t)) is not None), None)
+        after.addprevious(ind) if after is not None else ppr.append(ind)
+    for a in ("firstLine", "hanging", "start", "end"):
+        ind.attrib.pop(qn("w:" + a), None)
+    ind.set(qn("w:left"), str(max(0, int(left))))
+    if hanging:
+        ind.set(qn("w:hanging"), str(int(hanging)))
+    if right is not None:
+        ind.set(qn("w:right"), str(int(right)))
+
+
+def _has_visible_border(tbl):
+    from docx.oxml.ns import qn
+    for b in tbl.iter(qn("w:tcBorders"), qn("w:tblBorders")):
+        for e in b:
+            if e.get(qn("w:val")) not in (None, "nil", "none"):
+                return True
+    return False
+
+
+_FROM_BULLET_TABLE = []      # 표에서 문단으로 바꾼 글머리 문단(같은 글머리 이웃과 위치 맞춤용)
+
+
+def _join_runs(p, runs):
+    """p 끝에 runs 를 이어 붙인다 — 앞 글 끝 빈칸·뒤 글 앞 빈칸을 정리해 사이에 빈칸 딱 하나."""
+    from docx.oxml.ns import qn
+    ts = [t for t in p.iter(qn("w:t"))]
+    if ts:
+        ts[-1].text = (ts[-1].text or "").rstrip() + " "
+        ts[-1].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    first = True
+    for r in runs:
+        if first:
+            for t in r.findall(qn("w:t")):
+                t.text = (t.text or "").lstrip()
+                if t.text:
+                    first = False
+                    break
+        p.append(r)
+
+
+def align_table_bullets(d):
+    """표에서 바꾼 글머리 문단을 바로 이웃한 같은 글머리 문단과 같은 들여쓰기로(원본은 ➢ 들이 한 줄로 서 있다).
+    바꾼 문단 수."""
+    from docx.oxml.ns import qn
+    n = 0
+
+    def bullet_of(p):
+        t = _par_text(p).lstrip()
+        return t[0] if t and t[0] in HANG_BULLETS else None
+    for p in _FROM_BULLET_TABLE:
+        if p.getparent() is None:
+            continue
+        b = bullet_of(p)
+        if not b:
+            continue
+        ref = None
+        for sib in list(p.itersiblings()) + list(p.itersiblings(preceding=True)):
+            if sib.tag != qn("w:p") or sib in _FROM_BULLET_TABLE:
+                continue
+            if bullet_of(sib) == b:
+                ref = sib
+                break
+            if bullet_of(sib):                           # 다른 글머리가 먼저 나오면 다른 묶음
+                break
+        if ref is None:
+            continue
+        l, fl, hg = _ind_vals(ref)
+        _set_ind(p, l, hg, 0)
+        rsp = ref.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+        psp = p.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+        if rsp is not None and psp is not None and rsp.get(qn("w:lineRule"), "auto") == "auto":
+            # 이웃 글머리 문단들은 한 줄짜리라 줄 사이 = 앞 간격 + 줄 높이. 여러 줄로 합친 이 문단도 줄 사이를 그만큼
+            try:
+                pitch = int(rsp.get(qn("w:before"), "0")) + int(rsp.get(qn("w:line"), "240"))
+                psp.set(qn("w:line"), str(max(240, pitch)))
+                psp.set(qn("w:lineRule"), "auto")
+            except ValueError:
+                pass
+        n += 1
+    _FROM_BULLET_TABLE.clear()
+    return n
+
+
+def align_continuations(d):
+    """글머리 문단 바로 뒤, 글머리 없이 이어지는 줄(pdf2docx 가 따로 뗀 둘째 줄)을 글머리 글 시작 자리에 맞춘다.
+    ★내곡동 3쪽 '26 일 PF 리파이낸싱을 완료함.' 이 글 시작보다 오른쪽으로 밀려 있었다(원본은 글 시작과 같은 자리).
+    글머리보다 오른쪽 ~ 글 시작+20pt 사이에 있는 줄만(그보다 더 들여 쓴 건 하위 항목이라 그대로). 맞춘 문단 수."""
+    from docx.oxml.ns import qn
+    n = 0
+    for p in list(d.element.body.iter(qn("w:p"))):
+        t = _par_text(p).lstrip()
+        if not t or t[0] not in HANG_BULLETS:
+            continue
+        l, fl, hg = _ind_vals(p)
+        if not hg:
+            continue
+        start, text_at = l - hg, l
+        q = p.getnext()
+        while q is not None and q.tag == qn("w:p"):
+            qt = _par_text(q).strip()
+            if not qt or qt[0] in HANG_BULLETS or q.find(f".//{qn('w:drawing')}") is not None or \
+                    q.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                break
+            ql, qfl, qhg = _ind_vals(q)
+            qs = ql + qfl - qhg
+            if not (start + 60 < qs <= text_at + 400):
+                break
+            _set_ind(q, text_at, 0, 0)
+            n += 1
+            q = q.getnext()
+    return n
+
+
+def bullet_tables_to_paragraphs(d):
+    """선 없는 표인데 줄마다 [글머리 하나][글] 두 칸인 것 → 보통 글머리 문단으로. 바로 뒤에 이어지는 줄(글머리 없이
+    글 시작 자리에 들여 쓴 문단)은 그 문단에 이어 붙인다.
+    ★pdf2docx 가 '➢ 본건은…' 첫 줄을 보이지 않는 표로, 둘째 줄부터를 따로 문단으로 만들어
+    글머리가 혼자 한 줄을 차지하고 글이 아래로 밀렸다(내곡동 3쪽, 2026-10-14). 바꾼 표 수."""
+    import copy
+    from docx.oxml.ns import qn
+    n = 0
+    for tbl in list(d.element.body.iter(qn("w:tbl"))):
+        if tbl.getparent() is None:
+            continue
+        rows = tbl.findall(qn("w:tr"))
+        # 맨 위 글 없는 줄(제목 밑줄 등)은 표로 남기고 그 아래 글머리 줄만 문단으로
+        keep = 0
+        while keep < len(rows) and not "".join(x.text or "" for x in rows[keep].iter(qn("w:t"))).strip():
+            keep += 1
+        rows = rows[keep:]
+        if not rows or any(_has_visible_border(tr) for tr in rows):
+            continue
+        ok = True
+        for tr in rows:
+            tcs = tr.findall(qn("w:tc"))
+            if len(tcs) != 2 or tcs[0].find(".//" + qn("w:tbl")) is not None or tcs[1].find(".//" + qn("w:tbl")) is not None:
+                ok = False
+                break
+            t0 = "".join(x.text or "" for x in tcs[0].iter(qn("w:t"))).strip()
+            if len(t0) != 1 or t0 not in HANG_BULLETS:
+                ok = False
+                break
+        if not ok:
+            continue
+        new_ps = []
+        for tr in rows:
+            tcs = tr.findall(qn("w:tc"))
+            bullet_r = next(r for r in tcs[0].iter(qn("w:r")) if "".join(x.text or "" for x in r.iter(qn("w:t"))).strip())
+            text_ps = [p for p in tcs[1] if p.tag == qn("w:p")]
+            p = copy.deepcopy(text_ps[0]) if text_ps else tbl.makeelement(qn("w:p"), {})
+            ppr = p.find(qn("w:pPr"))
+            first_run = next((c for c in p if c.tag == qn("w:r")), None)
+            br = copy.deepcopy(bullet_r)
+            if first_run is not None:
+                first_run.addprevious(br)
+            else:
+                p.append(br)
+            for extra in text_ps[1:]:                      # 칸 안 여러 문단은 띄어쓰기 하나로 이어 붙임
+                _join_runs(p, [copy.deepcopy(r) for r in extra.findall(qn("w:r"))])
+            if ppr is not None:
+                jc = ppr.find(qn("w:jc"))
+                if jc is not None:
+                    jc.set(qn("w:val"), "left")
+                ind = ppr.find(qn("w:ind"))
+                if ind is not None:
+                    for a in list(ind.attrib):
+                        ind.attrib.pop(a)
+            new_ps.append(p)
+        # 표 바로 뒤 이어지는 줄(글머리 없이 들여 쓴 문단)을 마지막 문단에 붙인다
+        nxt = tbl.getnext()
+        while nxt is not None and nxt.tag == qn("w:p"):
+            txt = "".join(x.text or "" for x in nxt.iter(qn("w:t")))
+            if not txt.strip() or txt.lstrip()[0] in HANG_BULLETS or nxt.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                break
+            l, fl, hg = _ind_vals(nxt)
+            if l + fl - hg < 100:                           # 글 시작 자리로 들여 쓰지 않은 문단 = 새 글
+                break
+            _join_runs(new_ps[-1], nxt.findall(qn("w:r")))
+            after = nxt.getnext()
+            nxt.getparent().remove(nxt)
+            nxt = after
+        _FROM_BULLET_TABLE.extend(new_ps)
+        if keep:
+            anchor = tbl
+            for p in new_ps:
+                anchor.addnext(p)
+                anchor = p
+            for tr in rows:
+                tbl.remove(tr)
+        else:
+            for p in new_ps:
+                tbl.addprevious(p)
+            tbl.getparent().remove(tbl)
+        n += 1
+    return n
+
+
+def split_bullet_lines(d):
+    """한 문단에 줄바꿈(w:br)으로 이어 붙은 줄 중 글머리로 시작하는 줄은 따로 문단으로 뗀다.
+    ★pdf2docx 는 원본 여러 줄을 한 문단에 줄바꿈으로 넣는다 → 둘째 글머리 줄이 칸 왼쪽에 붙었다(내곡동 6쪽, 2026-10-14)."""
+    import copy
+    from docx.oxml.ns import qn
+    n = 0
+    for p in list(d.element.body.iter(qn("w:p"))):
+        runs = [r for r in p if r.tag == qn("w:r")]
+        cuts = []
+        for i, r in enumerate(runs):
+            brs = r.findall(qn("w:br"))
+            if not brs or any(b.get(qn("w:type")) == "page" for b in brs):
+                continue
+            nxt = "".join(_par_text(x) for x in runs[i + 1:i + 3]).lstrip()
+            if nxt[:1] and nxt[0] in HANG_BULLETS:
+                cuts.append(i)
+        for i in reversed(cuts):
+            r = runs[i]
+            newp = p.makeelement(qn("w:p"), {})
+            ppr = p.find(qn("w:pPr"))
+            if ppr is not None:
+                c = copy.deepcopy(ppr)
+                for sp in c.findall(qn("w:sectPr")):
+                    c.remove(sp)
+                newp.append(c)
+            for x in runs[i + 1:]:
+                newp.append(x)
+            p.remove(r)
+            p.addnext(newp)
+            runs = runs[:i]
+            n += 1
+    return n
+
+
+def hang_bullets(d, ratios):
+    """글머리 문단 = 글머리 + 탭 + 글, '내어쓰기' 로 둘째 줄부터 글 시작에 맞춘다(원본 모양).
+    ★예전엔 글머리 뒤를 글자 간격(w:spacing)으로 벌려 첫 줄 간격이 크게 벌어지고(내곡동 3쪽 '➢ 본건은'),
+    둘째 줄·'(*)' 줄은 칸 왼쪽에 붙었다(내곡동 6쪽). 글머리~글 거리는 원본에서 잰 값(글자 크기 기준)."""
+    import copy
+    from docx.oxml.ns import qn
+    em = (ratios or {}).get("글자", {})
+    n = 0
+    for p in d.element.body.iter(qn("w:p")):
+        runs = [r for r in p if r.tag == qn("w:r") and r.find(qn("w:t")) is not None]
+        first = next((r for r in runs if _par_text(r).strip()), None)
+        if first is None:
+            continue
+        txt = _par_text(first).lstrip()
+        b = txt[0]
+        if b not in HANG_BULLETS:
+            continue
+        if b in "-·∙ㆍ" and len(_par_text(p).strip()) < 3:
+            continue
+        ts = first.findall(qn("w:t"))
+        rest = (ts[0].text or "").lstrip()[1:]
+        ts[0].text = b
+        for t in ts[1:]:
+            rest += t.text or ""
+            first.remove(t)
+        rpr = first.find(qn("w:rPr"))
+        if rpr is not None:
+            for sp in rpr.findall(qn("w:spacing")):
+                rpr.remove(sp)
+        tab_r = first.makeelement(qn("w:r"), {})
+        if rpr is not None:
+            tab_r.append(copy.deepcopy(rpr))
+        tab_r.append(tab_r.makeelement(qn("w:tab"), {}))
+        first.addnext(tab_r)
+        rest = rest.lstrip()
+        if rest:
+            rr = copy.deepcopy(first)
+            for t in rr.findall(qn("w:t")):
+                rr.remove(t)
+            t = rr.makeelement(qn("w:t"), {"{http://www.w3.org/XML/1998/namespace}space": "preserve"})
+            t.text = rest
+            rr.append(t)
+            tab_r.addnext(rr)
+        else:
+            for t in p.iter(qn("w:t")):
+                if t.getparent() in (first, tab_r):
+                    continue
+                t.text = (t.text or "").lstrip()
+                if t.text:
+                    break
+        gap_em = em.get(("글머리", b)) or 1.3
+        gap = int(round(min(max(gap_em, 0.8), 2.5) * 9 * 20))
+        left, fl, hg = _ind_vals(p)
+        _set_ind(p, left + fl - hg + gap, gap)
+        ppr = p.find(qn("w:pPr"))
+        tabs = ppr.find(qn("w:tabs")) if ppr is not None else None
+        if tabs is not None:
+            ppr.remove(tabs)
+        n += 1
+    return n
+
+
+def even_cell_margins(d):
+    """칸 안 왼쪽·오른쪽 여백을 같게(85 twips ≈0.15cm). 가운데·오른쪽 정렬 문단은 들여쓰기 0.
+    왼쪽 정렬 문단은 칸 안 가장 왼쪽 문단을 0 으로 맞추고 상대 위치(들여 쓴 항목·내어쓰기)는 그대로.
+    ★pdf2docx 는 칸 여백 0 + 문단 들여쓰기로 글 위치를 흉내 내 정렬이 원본과 어긋났다(2026-10-14 사용자 지적)."""
+    from docx.oxml.ns import qn
+    M = 85
+    n = 0
+    for tc in d.element.body.iter(qn("w:tc")):
+        ps = [p for p in tc if p.tag == qn("w:p")]
+        tcpr = tc.find(qn("w:tcPr"))
+        if not ps or tcpr is None:
+            continue
+        mar = tcpr.find(qn("w:tcMar"))
+        if mar is None:
+            mar = tcpr.makeelement(qn("w:tcMar"), {})
+            after = next((tcpr.find(qn(t)) for t in ("w:textDirection", "w:tcFitText", "w:vAlign", "w:hideMark")
+                          if tcpr.find(qn(t)) is not None), None)
+            after.addprevious(mar) if after is not None else tcpr.append(mar)
+        for e in list(mar):
+            if e.tag in (qn("w:start"), qn("w:end"), qn("w:left"), qn("w:right")):
+                mar.remove(e)
+        top = mar.find(qn("w:top"))
+        lft = mar.makeelement(qn("w:left"), {qn("w:w"): str(M), qn("w:type"): "dxa"})
+        top.addnext(lft) if top is not None else mar.insert(0, lft)
+        bot = mar.find(qn("w:bottom"))
+        rgt = mar.makeelement(qn("w:right"), {qn("w:w"): str(M), qn("w:type"): "dxa"})
+        bot.addnext(rgt) if bot is not None else mar.append(rgt)
+
+        def jcv(p):
+            jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+            return jc.get(qn("w:val")) if jc is not None else "left"
+        lefts = []
+        for p in ps:
+            if jcv(p) in ("center", "right", "end"):
+                _set_ind(p, 0, 0, 0)
+            elif _par_text(p).strip():
+                l, fl, hg = _ind_vals(p)
+                lefts.append(l + fl - hg)
+        base = min(lefts) if lefts else 0
+        for p in ps:
+            if jcv(p) in ("center", "right", "end"):
+                continue
+            l, fl, hg = _ind_vals(p)
+            if hg:
+                _set_ind(p, l - base, hg, 0)
+            else:
+                _set_ind(p, max(0, l + fl - base), 0, 0)
         n += 1
     return n
 
@@ -1963,6 +2500,10 @@ def loosen_row_heights(d):
     return n
 
 
+_WING_BULLETS = {"": "•", "": "•", "": "○", "": "●", "": "■", "": "▪",
+                 "": "◆", "": "◆", "": "➢", "": "➢", "": "✓", "": "•"}
+
+
 def fix_symbol_runs(d):
     """기호 글꼴(Wingdings 등)이 붙어 있는데 글자는 보통 유니코드 기호인 조각 → 'Segoe UI Symbol'.
 
@@ -1977,6 +2518,11 @@ def fix_symbol_runs(d):
         if rf is None or not any(_SYMBOL_FONT_RE.search(rf.get(qn("w:" + k)) or "") for k in ("ascii", "hAnsi", "eastAsia", "cs")):
             continue
         txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
+        # 자주 쓰는 Wingdings 글머리(전용 번호)는 보통 기호로 — 워드에서 거의 안 보이고 내어쓰기도 못 했다(대전 하이라이트 '')
+        if txt.strip() and all(c in _WING_BULLETS or c.isspace() for c in txt):
+            for t in r.findall(qn("w:t")):
+                t.text = "".join(_WING_BULLETS.get(c, c) for c in (t.text or ""))
+            txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
         if txt and all(not (0xF000 <= ord(c) <= 0xF0FF) for c in txt):
             for k in ("ascii", "hAnsi", "eastAsia", "cs"):
                 rf.set(qn("w:" + k), "Segoe UI Symbol")
@@ -2259,10 +2805,35 @@ _EMU = {"extent": ("cx", "cy"), "ext": ("cx", "cy"), "off": ("x", "y"),
         "effectExtent": ("l", "t", "r", "b")}
 
 
+_NOTE_RE = re.compile(r"^\s*(※|\*|＊|주\s*\d|\(\s*단위|\(?\s*source|\(?\s*출처|자료\s*:)", re.I)
+
+
+def _sz_target(v, s, el):
+    """글자 크기(반 pt) 정하기 — 2026-10-14 사용자 확정.
+    · 본문(원본 8~10.5pt) → **9pt**
+    · 참고·각주·단위·출처 글(※, *, 주1), (단위…), Source…)과 원본 8pt 미만 → 원본 크기 그대로
+    · 제목(원본 11pt 이상) → 줄이더라도 11pt 아래로는 안 내림"""
+    W_ = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    if v < 16:
+        return v
+    p = next((a for a in el.iterancestors() if a.tag == W_ + "p"), None)
+    txt = "".join(t.text or "" for t in p.iter(W_ + "t")) if p is not None else ""
+    if _NOTE_RE.match(txt):
+        return v
+    if v <= 21:
+        return MIN_SZ
+    return max(int(round(v * s)), 22)
+
+
 def scale_xml(root, s, old_left=0.0, sw=None):
     """root 안의 길이를 줄인다: 세로·크기(글자·간격·줄 높이·그림)는 s 배, 가로(표·칸 폭·들여쓰기·탭)는 sw 배(없으면 s)."""
     sw = s if sw is None else sw
     if s >= 0.999 and sw >= 0.999:
+        W_ = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        for el in root.iter(W_ + "sz", W_ + "szCs"):          # 줄이지 않는 쪽도 본문 글자는 9pt 로
+            v = el.get(W_ + "val")
+            if v and v.isdigit() and el.getparent().tag == W_ + "rPr":
+                el.set(W_ + "val", str(_sz_target(int(v), 1.0, el)))
         return
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
@@ -2287,8 +2858,7 @@ def scale_xml(root, s, old_left=0.0, sw=None):
             if name in _HALF:
                 v = el.get(W + "val")
                 if name in ("sz", "szCs") and v and v.isdigit():
-                    # ★글자는 줄여도 최소 8pt(원본이 8pt 보다 작으면 원본 크기) — 2026-10-14 사용자 확정 '작아도 8'
-                    el.set(W + "val", str(max(int(round(int(v) * s)), min(int(v), MIN_SZ))))
+                    el.set(W + "val", str(_sz_target(int(v), s, el)))
                 else:
                     mul(el, "val", minimum=2)
             elif name == "spacing":
