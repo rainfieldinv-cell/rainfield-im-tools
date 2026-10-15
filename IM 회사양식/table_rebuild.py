@@ -185,7 +185,10 @@ def _paragraphs(lines, cell):
     # 같은 높이(같은 줄) 조각은 한 줄로
     rows = []
     for r, sp in lines:
-        if rows and abs(rows[-1][0].y0 - r.y0) < 2 and abs(rows[-1][0].y1 - r.y1) < 3:
+        pr_ = rows[-1][0] if rows else None
+        ov = (min(pr_.y1, r.y1) - max(pr_.y0, r.y0)) if pr_ is not None else -1
+        if rows and (abs(pr_.y0 - r.y0) < 2 and abs(pr_.y1 - r.y1) < 3 or
+                     ov >= 0.5 * min(pr_.height, r.height) and r.x0 >= pr_.x1 - 1):   # 높이가 조금 다른 같은 줄(글머리·글)
             rows[-1] = (rows[-1][0] | r, rows[-1][1] + [None] + sp)
         else:
             rows.append((fitz.Rect(r), list(sp)))
@@ -194,12 +197,17 @@ def _paragraphs(lines, cell):
     for i, (r, sp) in enumerate(rows):
         txt = "".join(s["text"] for s in sp if s).strip()
         new = not paras
+        if paras and len(paras[-1]) == 1 and _is_lone_bullet(*paras[-1][0]):
+            paras[-1].append((r, sp))                          # 글머리만 있던 줄 → 다음 줄 글이 그 글머리 문단
+            continue
         if paras:
             pr, psp = paras[-1][-1]
             gap = r.y0 - pr.y1
             h = max(pr.height, 1)
-            if txt[:1] in BULLETS or re.match(r"^(\(?\d{1,2}[).]|[①-⑳]|주\d|\*|※)", txt):
+            if txt[:1] in BULLETS or (0xF000 <= ord(txt[:1] or " ") <= 0xF0FF) or                     re.match(r"^(\(?\d{1,2}[).]|[①-⑳]|주\d|\*|※)", txt):
                 new = True
+            elif cell.x1 - pr.x1 < width * 0.08 and gap < h * 1.5:
+                new = False                                    # 앞 줄이 칸을 꽉 채움 → 같은 문장이 이어지는 줄(고산 담보처분권한)
             elif cell.x1 - pr.x1 > width * 0.2 and r.x0 - cell.x0 < width * 0.3:
                 new = True                                     # 앞 줄이 짧게 끝남
             elif gap > h * 0.8:
@@ -217,8 +225,13 @@ def _paragraphs(lines, cell):
 def _align(par, cell):
     lg = [r.x0 - cell.x0 for r, _ in par]
     rg = [cell.x1 - r.x1 for r, _ in par]
+    first = "".join(s["text"] for s in par[0][1] if s).strip()[:1]
+    is_bullet = bool(first) and (first in BULLETS or 0xF000 <= ord(first) <= 0xF0FF)
     if len(par) >= 2 and all(g < 6 for g in rg[:-1]) and all(abs(g - lg[0]) < 3 for g in lg[1:]):
         return "both", lg[0]
+    # ★글머리 줄·칸을 거의 채운 줄은 가운데·오른쪽이 아니다(고산 6쪽 '▪ 본 대출약정…' 이 가운데로 잡혀 글머리 뒤가 크게 벌어짐)
+    if is_bullet or all(a < 8 and b < 8 for a, b in zip(lg, rg)):
+        return ("both" if len(par) >= 2 else "left"), min(lg)
     if all(abs(a - b) < max(3, cell.width * 0.04) for a, b in zip(lg, rg)) and min(lg) > 2:
         return "center", 0
     if all(b < 6 for b in rg) and min(lg) > 8:
@@ -244,7 +257,25 @@ def _run(text, s):
     return r
 
 
-def _par_el(par, cell):
+def _is_bullet_char(c):
+    return c in BULLETS or 0xF000 <= ord(c) <= 0xF0FF
+
+
+def _bullet_geom(par):
+    """첫 줄이 글머리로 시작하면 (글머리 x, 글 시작 x), 아니면 None — 원본에서 잰 자리."""
+    chars = [(ch, cb) for _, sp_ in par[:2] for s in sp_ if s for ch, cb in s.get("chars", [])]
+    k = next((i for i, (ch, _) in enumerate(chars) if ch.strip()), None)
+    if k is None or not _is_bullet_char(chars[k][0]):
+        return None
+    t = next(((ch, cb) for ch, cb in chars[k + 1:] if ch.strip()), None)
+    if t is None:
+        return None
+    return chars[k][1].x0, t[1].x0
+
+
+def _par_el(par, cell, before_pt=0.0):
+    """원본 글 줄 묶음 → 문단. 들여쓰기·글머리 뒤 글 시작·둘째 줄 자리는 원본에서 잰 그대로(2026-10-15 사용자: '간격 제멋대로').
+    글머리 문단 = [글머리][탭][글], 왼쪽 들여쓰기 = 글 시작 자리, 내어쓰기 = 글 시작 − 글머리 자리."""
     p = etree.Element(qn("w:p"))
     ppr = etree.SubElement(p, qn("w:pPr"))
     jc, left = _align(par, cell)
@@ -256,19 +287,38 @@ def _par_el(par, cell):
         line = max(200, min(line, 480))
     else:
         line = 240
-    etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0", qn("w:line"): str(line),
-                                            qn("w:lineRule"): "auto"})
-    etree.SubElement(ppr, qn("w:ind"), {qn("w:left"): str(_tw(max(0, left)) if jc in ("left", "both") else 0),
-                                        qn("w:right"): "0", qn("w:firstLine"): "0"})
+    etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): str(max(0, _tw(before_pt))), qn("w:after"): "0",
+                                            qn("w:line"): str(line), qn("w:lineRule"): "auto"})
+    bg = _bullet_geom(par)
+    if bg and jc in ("left", "both"):
+        bx, tx = bg
+        if len(par) >= 2:                                      # 둘째 줄이 있으면 그 줄 시작이 글 자리
+            tx = min(tx, par[1][0].x0) if abs(par[1][0].x0 - tx) < 6 else tx
+        from pdf_input import BULLET_EM, _WING_BULLETS
+        bc = next((ch for s in par[0][1] if s for ch, _ in s.get("chars", []) if ch.strip()), "•")
+        bc = _WING_BULLETS.get(bc, bc)
+        fs = max(size, 9.0)                                    # 본문 9pt 규칙으로 커질 글자
+        need = (BULLET_EM.get(bc, 0.9) + 0.3) * fs             # 글머리 글자 폭보다 좁으면 탭이 36pt 로 튄다
+        if tx - bx < need:
+            tx = bx + need
+        etree.SubElement(ppr, qn("w:ind"), {qn("w:left"): str(_tw(max(0, tx - cell.x0))), qn("w:right"): "0",
+                                            qn("w:hanging"): str(max(1, _tw(tx - bx)))})
+    else:
+        bg = None
+        etree.SubElement(ppr, qn("w:ind"), {qn("w:left"): str(_tw(max(0, left)) if jc in ("left", "both") else 0),
+                                            qn("w:right"): "0", qn("w:firstLine"): "0"})
     etree.SubElement(ppr, qn("w:jc"), {qn("w:val"): jc})
     first = True
+    bullet_done = bg is None
     for k, (r, sp) in enumerate(par):
-        if k:                                                  # 줄 사이 = 띄어쓰기(원본 줄바꿈은 워드가 다시)
+        if k and not first:                                    # 줄 사이 = 띄어쓰기(원본 줄바꿈은 워드가 다시)
             last_t = p.findall(f".//{qn('w:t')}")
             if last_t and not (last_t[-1].text or "").endswith(" "):
                 last_t[-1].text = (last_t[-1].text or "") + " "
         for s in sp:
             if s is None:                                      # 같은 줄 떨어진 조각 사이
+                if first:
+                    continue                                   # ★글머리 바로 뒤엔 빈칸 X — 글머리가 넓어져 탭이 36pt 로 튀었다(고산 6쪽)
                 last_t = p.findall(f".//{qn('w:t')}")
                 if last_t and not (last_t[-1].text or "").endswith(" "):
                     last_t[-1].text = (last_t[-1].text or "") + " "
@@ -279,6 +329,19 @@ def _par_el(par, cell):
             if not text:
                 continue
             first = False
+            if not bullet_done:                                # 글머리 → [글머리][탭][글]
+                bc, rest = text[0], text[1:].lstrip()
+                p.append(_run(bc, s))
+                tab = _run("", s)
+                tab.remove(tab.find(qn("w:t")))
+                etree.SubElement(tab, qn("w:tab"))
+                p.append(tab)
+                bullet_done = True
+                first = True
+                if rest:
+                    first = False
+                    p.append(_run(rest, s))
+                continue
             p.append(_run(text, s))
     ts = p.findall(f".//{qn('w:t')}")
     if ts:
@@ -449,7 +512,14 @@ def _split_islands(segs, box):
     X = [box.x0, box.x1]
     for x in xs_all:
         rs = [r for r, o, _ in vs if abs(_mid(r, "v") - x) <= TOL]
-        cov = sum(r.height for r in rs)
+        iv = sorted((r.y0, r.y1) for r in rs)                # 가장 길게 이어진 길이(따로 떨어진 안쪽 표 둘을 더하면 안 된다 — 고산 9쪽)
+        cov, cur = 0.0, None
+        for a_, b_ in iv:
+            if cur and a_ <= cur[1] + TOL * 2:
+                cur[1] = max(cur[1], b_)
+            else:
+                cur = [a_, b_]
+            cov = max(cov, cur[1] - cur[0])
         if _intervals_reach(rs, box.y0, box.y1) or cov >= box.height * 0.6:   # 소계 점선 네모(내곡동 우발채무)도 바깥 칸 줄
             X.append(x)
     X = sorted(_cluster(X))
@@ -473,8 +543,9 @@ def _split_islands(segs, box):
             if not any(it in fv for it in comp):
                 continue
             nh = len(_cluster([_mid(r, o) for r, o, real in comp if o == "h" and real]))
-            if nh < 2:
-                continue
+            nv = len(_cluster([_mid(r, o) for r, o, real in comp if o == "v" and real]))
+            if nh < 2 or (nh < 3 and nv < 3):
+                continue                                       # 네 변뿐인 테두리(지도 그림 테두리 등)는 표가 아니다(고산 사업지 분석)
             fvs = [it for it in comp if it in fv]
             y0 = min(r.y0 for r, o, _ in fvs)
             y1 = max(r.y1 for r, o, _ in fvs)
@@ -483,6 +554,9 @@ def _split_islands(segs, box):
                 continue
             R = fitz.Rect(min(r.x0 for r in hb), min(_mid(r, "h") for r in hb),
                           max(r.x1 for r in hb), max(_mid(r, "h") for r in hb))
+            nfx = len(_cluster([_mid(r, "v") for r, o, _ in fvs]))
+            if nfx <= 1 and abs(R.x0 - xl) < 2.5 and abs(R.x1 - xr) < 2.5:
+                continue                                       # 칸 폭 꽉 찬 세로줄 하나 = 몇 줄만 나뉜 합친 칸(고산 공급개요 '아파트|84A')
             if R.height > 8 and R.width > 20:
                 regions.append(R)
     if not regions:
@@ -498,7 +572,7 @@ def _split_islands(segs, box):
             return Rb.y0 < m < Rb.y1 and ov > r.width * 0.5
         m = (r.x0 + r.x1) / 2
         ov = min(r.y1, R.y1) - max(r.y0, R.y0)
-        return R.x0 + TOL < m and ov > r.height * 0.5 and r.y0 >= Rb.y0 and r.y1 <= Rb.y1 and m > R.x1 - TOL
+        return ov > r.height * 0.5 and r.y0 >= Rb.y0 and r.y1 <= Rb.y1 and R.x1 - TOL < m <= R.x1 + 20   # 오른쪽으로 삐져나온 테두리만
     outer = [sg for sg in segs if not any(inside(sg[0], R) for R in regions)]
     islands = []
     for R in regions:
@@ -654,8 +728,9 @@ def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False,
     # 옆에 글 없는 글머리 혼자(원본 찌꺼기 '•', 내곡동 신탁사·납입비율 칸)는 뺀다 — 칸이 쪼개지거나 빈 줄이 생겼다
     for k, items in per_cell.items():
         per_cell[k] = [(bx, sp) for bx, sp in items
-                       if not _is_lone_bullet(bx, sp)
-                       or any(o is not bx and abs(o.y0 - bx.y0) < 3 and o.x0 > bx.x0 for o, _ in items)]
+                       if not _is_lone_bullet(bx, sp) or (not nested and
+                       any(o is not bx and o.x0 > bx.x0 and
+                           min(o.y1, bx.y1) - max(o.y0, bx.y0) >= 0.3 * min(o.height, bx.height) for o, _ in items))]
 
     tbl = etree.Element(qn("w:tbl"))
     tpr = copy.deepcopy(old_pr) if old_pr is not None else etree.Element(qn("w:tblPr"))
@@ -726,12 +801,21 @@ def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False,
                 for g_i in pic_of.get(k, []):
                     items.append((my_pics[g_i][0].y0, 2, g_i))
                 items.sort(key=lambda x: (x[0], x[1]))
+                prev = None                                    # 앞 문단 마지막 줄(원본 문단 사이 간격 그대로)
                 for y, kind, val in items:
                     if kind == 0:
-                        tc.append(_par_el(val, rect))
+                        before = 0.0
+                        if prev is not None:
+                            sz = max([s["size"] for _, sp in val for s in sp if s] or [9])
+                            before = max(0.0, (val[0][0].y0 - prev.y0) - sz * 1.5625 * 1.0)
+                            before = min(before, 24)
+                        tc.append(_par_el(val, rect, before))
+                        prev = val[-1][0]
                     elif kind == 2:
                         tc.append(_pic_par(part, my_pics[val][1], my_pics[val][0], rect))
+                        prev = None
                     else:
+                        prev = None
                         b = ibox[val]
                         sub = _build(page, islands[val], b, lines, fills,
                                      [x for x in text_lines if b.intersects(x[0])], nested=True,
@@ -739,6 +823,14 @@ def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False,
                         if sub is not None:
                             tc.append(sub)
                             tc.append(_empty_p("40"))          # 워드: 칸 안 표 뒤에는 문단이 꼭 있어야 한다
+                        else:                                  # 안쪽 표를 못 짜면 그 안 그림·글을 칸에 그대로(빠뜨리지 않게)
+                            for r, png in my_pics:
+                                if (b + (-2, -2, 2, 2)).contains(r):
+                                    tc.append(_pic_par(part, png, r, rect))
+                            inner_txt = [(bx, sp) for key, bx, sp in _pieces(text_lines, lambda pt: "x" if b.contains(pt) else None)
+                                         if key == "x"]
+                            for par in (_paragraphs(inner_txt, b) if inner_txt else []):
+                                tc.append(_par_el(par, rect))
             if tc[-1].tag != qn("w:p"):
                 tc.append(_empty_p())
             cc += span
@@ -787,6 +879,23 @@ def rebuild_page(page, groups, part=None):
         tb = fitz.Rect(tab.bbox)
         if tab.row_count < 2 or tb.width < 30:
             continue
+        # ★세로선이 표 높이 일부만 덮으면 그 범위만 표다 — find_tables 가 머리 줄·점선까지 묶어 쪽 전체(그림·글머리 글 포함)를
+        #   표로 잡아 내곡동 하이라이트 글 순서가 뒤섞였다(2026-10-15). 세로선이 이어진 가장 긴 범위로 줄인다.
+        vy = sorted((r.y0, r.y1) for r, o, real in _segs(lines, fills, tb) if o == "v" and real)
+        runs, cur = [], None
+        for a_, b_ in vy:
+            if cur and a_ <= cur[1] + 3:
+                cur[1] = max(cur[1], b_)
+            else:
+                cur = [a_, b_]
+                runs.append(cur)
+        if not runs:
+            continue
+        best = max(runs, key=lambda x: x[1] - x[0])
+        if best[1] - best[0] < tb.height * 0.85:
+            tb = fitz.Rect(tb.x0, max(tb.y0, best[0] - 1.5), tb.x1, min(tb.y1, best[1] + 1.5))
+            if tb.height < 15:
+                continue
         if any((d + (-2, -2, 2, 2)).contains(tb) for d in done_boxes):
             continue                                           # 이미 다시 짠 큰 표 안의 표
         if part is None and any((ir & tb).get_area() > 25 for ir in big_imgs if ir.intersects(tb)):

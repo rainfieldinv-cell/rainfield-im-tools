@@ -58,9 +58,21 @@ def text_per_page(pdf_bytes):
     return n / max(doc.page_count, 1)
 
 
+_END_RE = re.compile(r"^[\s\-–—]*(끝|end|the\s*end|감사합니다|thank\s*you)[\s\-–—.!]*$", re.I)
+
+
 def last_page_is_contact(doc):
-    t = doc[-1].get_text()
-    return len(set(EMAIL_RE.findall(t))) + len(set(PHONE_RE.findall(t))) >= 2
+    """원본 마지막 쪽이 연락처 쪽이거나 '-끝-'·'감사합니다' 만 있는 끝 쪽이면 True(그 쪽은 뺀다 — 결과 끝은 회사 연락처 쪽).
+    ★고산3지구 30쪽 '-끝-' 이 남았다(2026-10-15 사용자 17번)."""
+    pg = doc[-1]
+    t = pg.get_text()
+    if len(set(EMAIL_RE.findall(t))) + len(set(PHONE_RE.findall(t))) >= 2:
+        return True
+    lines = [l.strip() for l in t.splitlines() if l.strip()]
+    lines = [l for l in lines if not re.fullmatch(r"[\d\s/\-–—.|pPage]+", l)]   # 쪽번호 줄
+    if pg.get_images() and any(fitz.Rect(i["bbox"]).get_area() > pg.rect.get_area() * 0.2 for i in pg.get_image_info()):
+        return False                                               # 큰 그림이 있는 쪽은 본문
+    return bool(lines) and len(lines) <= 3 and any(_END_RE.match(l) for l in lines)
 
 
 SECTION_HEAD_RE = re.compile(r"^\s*(\d{1,2}\s*\.|[Ⅰ-Ⅻ]\s*\.?|[IVX]{1,4}\s*\.)\s*\S")
@@ -933,6 +945,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["글머리 앞 줄바꿈"] = break_before_bullets(d)
     rep["글머리 표 → 문단"] = bullet_tables_to_paragraphs(d)
     rep["글머리 줄 문단 나눔"] = split_bullet_lines(d)
+    rep["표 밖 줄바꿈·탭 원본 줄대로"] = split_body_breaks(d)
     rep["글머리 내어쓰기"] = hang_bullets(d, width_ratio)
     rep["표에서 온 글머리 위치 맞춤"] = align_table_bullets(d)
     rep["글머리 다음 줄 맞춤"] = align_continuations(d)
@@ -1275,6 +1288,8 @@ def drop_grid_tables(d):
     return n
 
 
+BULLET_EM = {"•": 0.41, "▪": 0.86, "■": 0.86, "➢": 0.96, "✓": 0.75, "◆": 0.86, "○": 0.86, "●": 0.86, "▶": 0.86,
+             "※": 1.0, "-": 0.4, "·": 0.3, "ㆍ": 0.5, "◦": 0.6, "□": 0.86, "▷": 0.86, "◇": 0.86}   # Segoe UI Symbol 실측 폭(em)
 HANG_BULLETS = "•▪■□◦○●➢✓※▶▷◆◇◼◻-·∙ㆍ"
 
 
@@ -1553,6 +1568,13 @@ def hang_bullets(d, ratios):
         b = txt[0]
         if b not in HANG_BULLETS:
             continue
+        nx = first.getnext()
+        if txt.strip() == b and nx is not None and nx.tag == qn("w:r") and nx.find(qn("w:tab")) is not None:
+            for r_ in (first, nx):                             # 이미 [글머리][탭][글] (원본 선으로 다시 짠 표 — 원본 자리 그대로)
+                rp = r_.find(qn("w:rPr"))                      # 글머리 글자 벌림이 남으면 탭을 넘어 글이 밀린다
+                for sp_ in (rp.findall(qn("w:spacing")) if rp is not None else []):
+                    rp.remove(sp_)
+            continue
         if b in "-·∙ㆍ" and len(_par_text(p).strip()) < 3:
             continue
         ts = first.findall(qn("w:t"))
@@ -1587,6 +1609,8 @@ def hang_bullets(d, ratios):
                 if t.text:
                     break
         gap_em = em.get(("글머리", b)) or 1.3
+        # ★글머리 글자보다 좁으면 탭이 다음 기본 탭(36pt)까지 튀어 글머리 뒤가 크게 벌어졌다(고산 '▪' = 0.86em, 2026-10-15)
+        gap_em = max(gap_em, BULLET_EM.get(b, 0.9) + 0.3)
         gap = int(round(min(max(gap_em, 0.8), 2.5) * 9 * 20))
         left, fl, hg = _ind_vals(p)
         _set_ind(p, left + fl - hg + gap, gap)
@@ -1646,6 +1670,95 @@ def even_cell_margins(d):
             else:
                 _set_ind(p, max(0, l + fl - base), 0, 0)
         n += 1
+    return n
+
+
+def split_body_breaks(d):
+    """표 밖 문단: pdf2docx 가 [제목 줄][줄바꿈][탭탭 본문 줄][탭 다음 줄]… 로 한 문단에 넣은 것을 원본 줄대로 고친다.
+    ① 줄바꿈 자리마다 문단을 나눔(제목 '■ 도시계획변경 사전협상제도 개요' 와 본문이 한 문단이었다)
+    ② 새 문단 맨 앞 탭은 지움(탭 두 개로 첫 줄이 크게 들여 써졌다), 들여쓰기는 원래 문단 글머리 자리
+    ③ 줄 가운데 '긴 글 뒤 탭' = 원본 줄이 바뀐 자리 → 줄바꿈('…2023      년' 처럼 벌어졌다). 고산 18쪽, 2026-10-15."""
+    import copy
+    from docx.oxml.ns import qn
+    n = 0
+    body = d.element.body
+    for p in list(body.findall(qn("w:p"))):
+        if p.find(f".//{qn('w:drawing')}") is not None:
+            continue
+        brs = [r for r in p.findall(qn("w:r")) if any(b.get(qn("w:type")) in (None, "textWrapping") for b in r.findall(qn("w:br")))]
+        # ★[줄바꿈] 바로 뒤가 [탭] 으로 시작하는 문단(고산 18쪽 모양)만 — 다른 문단(내곡 하이라이트 글머리 등)은 건드리면 망가졌다
+        def _tab_after(r):
+            n_ = r.getnext()
+            return n_ is not None and n_.tag == qn("w:r") and n_.find(qn("w:tab")) is not None and                 not "".join(t.text or "" for t in n_.findall(qn("w:t"))).strip()
+        if not any(_tab_after(r) for r in brs):
+            continue
+        if _par_text(p).lstrip()[:1] in HANG_BULLETS and _par_text(p).lstrip()[:1] != "■":
+            continue
+        tabs_mid = []
+        acc = ""
+        for r in p.findall(qn("w:r")):
+            if r.find(qn("w:br")) is not None:
+                acc = ""
+            if r.find(qn("w:tab")) is not None and len(acc.strip()) >= 25:
+                tabs_mid.append(r)
+                acc = ""
+            acc += "".join(t.text or "" for t in r.findall(qn("w:t")))
+        if not brs and not tabs_mid:
+            continue
+        for r in tabs_mid:                                     # ③ 줄 바뀐 자리 탭 → 줄바꿈
+            for tb in r.findall(qn("w:tab")):
+                r.replace(tb, r.makeelement(qn("w:br"), {}))
+        if not brs:
+            n += 1
+            continue
+        l, fl, hg = _ind_vals(p)
+        base_left = max(0, l + fl - hg)
+        ppr = p.find(qn("w:pPr"))
+        segs, cur = [], []
+        for ch in [c for c in p if c.tag != qn("w:pPr")]:
+            if ch in brs:
+                segs.append(cur)
+                cur = []
+                continue
+            cur.append(ch)
+        segs.append(cur)
+        segs = [sg for sg in segs if "".join(t.text or "" for x in sg for t in x.iter(qn("w:t"))).strip()]
+        if len(segs) < 2:
+            continue
+        for ch in [c for c in p if c.tag != qn("w:pPr")]:
+            p.remove(ch)
+        for x in segs[0]:
+            p.append(x)
+        prev = p
+        for sg in segs[1:]:
+            np_ = p.makeelement(qn("w:p"), {})
+            if ppr is not None:
+                c = copy.deepcopy(ppr)
+                for sp in c.findall(qn("w:sectPr")):
+                    c.remove(sp)
+                np_.append(c)
+            while sg and sg[0].tag == qn("w:r") and sg[0].find(qn("w:tab")) is not None and                     not "".join(t.text or "" for t in sg[0].findall(qn("w:t"))):
+                sg = sg[1:]                                    # ② 맨 앞 탭 지움
+            for x in sg:
+                np_.append(x)
+            _set_ind(np_, base_left, 0, 0)
+            sp_ = np_.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+            if sp_ is not None:
+                sp_.set(qn("w:before"), "0")
+            if not np_.find(qn("w:pPr")) is None and _par_text(np_).lstrip()[:1] in HANG_BULLETS:
+                sp_b = np_.find(f"{qn('w:pPr')}/{qn('w:spacing')}")   # 글머리 소제목('■ 고산2지구…')은 위와 원본만큼 띄움(빈 줄 하나)
+                if sp_b is not None:
+                    sp_b.set(qn("w:before"), "200")
+            prev.addnext(np_)
+            prev = np_
+            n += 1
+        # ★원본 '앞 간격' 은 첫 줄(제목) 위 간격 — 그대로 두면 나눈 뒤 첫 문단 위에 두 줄 넘는 빈칸이 생겼다('4) 대관 협의 역량', 고산 19쪽)
+        sp0 = p.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+        if sp0 is not None and int(float(sp0.get(qn("w:before")) or 0)) > 300:
+            sp0.set(qn("w:before"), "200")
+        if p.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:   # 구역 끝 표시는 마지막 문단으로
+            sect = p.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+            prev.find(qn("w:pPr")).append(sect)
     return n
 
 

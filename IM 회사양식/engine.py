@@ -617,6 +617,59 @@ FIN_TITLE = "본건 기초자산 금융조건"
 _FIN_TITLE_RE = re.compile(r"(주요\s*)?금융\s*(개요|조건|구조)|금융\s*조건|금\s*융\s*조\s*건")
 
 
+_STRUCT_RE = re.compile(r"^[\s■□▪◆◇●○▶▷❑❏\-\d.)(\[\]<>Ⅰ-ⅫIVX]*\s*(금융|사업|거래|딜|대출)?\s*구\s*조\s*(도)?\s*[)\]>]?\s*$")
+
+
+def drop_structure_paragraphs(doc):
+    """원본 구조도가 표 밖 '■ 금융 구조도' 제목 + 그림 문단으로 있는 것 → 제목과 그림을 지운다(2026-10-15 사용자 4번:
+    '원본 구조도는 항상 뺀다, 무시하지 말고 치워'). 고산3지구 '1 금융 개요' 쪽. 지운 묶음 수."""
+    n = 0
+    body = doc.element.body
+    for p in list(body.findall(qn("w:p"))):
+        if p.getparent() is None:
+            continue
+        t = _vis_text(p).strip()
+        if not t or len(t) > 20 or not _STRUCT_RE.match(t):
+            continue
+        # 바로 뒤(빈 문단은 건너뛰고) 그림 문단이 있어야 원본 구조도
+        nxt = p.getnext()
+        gone = []
+        while nxt is not None and nxt.tag == qn("w:p") and not _vis_text(nxt).strip() and                 nxt.find(".//" + qn("w:drawing")) is None and nxt.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None:
+            gone.append(nxt)
+            nxt = nxt.getnext()
+        pic_tbl = nxt is not None and nxt.tag == qn("w:tbl") and nxt.find(".//" + qn("w:drawing")) is not None             and not _vis_text(nxt).strip()                      # 그림만 든 표(안산 '[금융 구조]')
+        if nxt is None or (not pic_tbl and (nxt.tag != qn("w:p") or nxt.find(".//" + qn("w:drawing")) is None)):
+            continue
+        pics = [nxt]                                           # 바로 아래 그림 하나만(그 다음 그림은 다른 내용일 수 있다 — 안산 자금 사용)
+        for el in [p] + gone + pics:
+            if el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:   # 구역 끝 문단은 남기고 내용만 비움
+                for ch in [c for c in el if c.tag != qn("w:pPr")]:
+                    el.remove(ch)
+            else:
+                el.getparent().remove(el)
+        n += 1
+    return n
+
+
+def right_align_units(doc):
+    """'[단위: 백만원]'·'(단위 : 억원)' 같은 단위 줄은 원본처럼 오른쪽 맞춤(고산 담보필지목록, 사용자 11번). 바꾼 수."""
+    n = 0
+    for p in doc.element.body.iter(qn("w:p")):
+        t = _vis_text(p).strip()
+        if not t or len(t) > 30 or not re.match(r"^[\[\(<]?\s*단\s*위\s*[:：]", t):
+            continue
+        ppr = _first_child(p, "pPr")
+        ind = ppr.find(qn("w:ind"))
+        if ind is not None:
+            for a in list(ind.attrib):
+                ind.attrib.pop(a)
+            ind.set(qn("w:left"), "0")
+            ind.set(qn("w:right"), "0")
+        _put(ppr, ppr.makeelement(qn("w:jc"), {qn("w:val"): "right"}))
+        n += 1
+    return n
+
+
 def drop_structure_rows(doc):
     """원본 표의 '구조도' 줄(구분 칸 글에 '구조도', 그 줄에 그림)을 지운다 — 회사 금융 구조도가 사모사채 개요 아래에
     따로 들어가므로(2026-10-13 사용자 확정 '구조도 사진 항목 행을 지워서 이어서'). 지운 수."""
@@ -626,7 +679,7 @@ def drop_structure_rows(doc):
         if len(tcs) < 2:
             continue
         label = "".join(t.text or "" for t in tcs[0].iter(qn("w:t"))).replace(" ", "")
-        if "구조도" not in label or len(label) > 12:
+        if len(label) > 12 or not re.search(r"(금융|사업|거래|대출|딜)?구조(도)?$", label):   # 신촌 '금융구조'(도 없음)
             continue
         if tr.find(".//" + qn("w:drawing")) is None and tr.find(".//" + qn("w:pict")) is None:
             continue
@@ -1090,11 +1143,16 @@ def _layout_cover(els, lines):
     아래 날짜와 겹친다(실제: '안산 OUR IDC PF 대출 / 부산_남포동_생활형숙박시설 신축사업 PF대출 후순위').
     """
     anchors = [a for el in els for a in el.iter("{%s}anchor" % NS["wp"])]
-    title = date_a = pic = disc = None
+    title = date_a = pic = disc = logo = im = None
     for a in anchors:
         t = "".join(x.text or "" for x in a.iter(qn("w:t")))
         if a.find(".//a:blip", NS) is not None:
-            pic = a
+            if int(a.find("wp:extent", NS).get("cy")) < 400000:
+                logo = a                                       # 회사 로고(작은 그림)
+            else:
+                pic = a
+        elif "Information Memorandum" in t:
+            im = a
         elif "Disclaimer" in t:
             disc = a
         elif re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}", t):
@@ -1104,6 +1162,19 @@ def _layout_cover(els, lines):
             title = a
     if title is None:
         return
+    # ★표지 순서(2026-10-15 사용자 사진): 'Information Memorandum' → 회사 로고 → 제목 → 날짜 → 사진 → Disclaimer
+    #   (양식은 로고가 맨 위). 로고를 IM 글 바로 아래로, 제목·날짜·사진은 그만큼 내린다.
+    if logo is not None and im is not None and all(_pos_v(x) is not None for x in (logo, im, title)):
+        im_y = int(_pos_v(im).text)
+        im_h = int(im.find("wp:extent", NS).get("cy"))
+        logo_h = int(logo.find("wp:extent", NS).get("cy"))
+        new_logo = im_y + im_h + 30000
+        _pos_v(logo).text = str(new_logo)
+        delta = new_logo + logo_h + 120000 - int(_pos_v(title).text)
+        if delta > 0:
+            for a in (title, date_a, pic):
+                if a is not None and _pos_v(a) is not None:
+                    _pos_v(a).text = str(int(_pos_v(a).text) + delta)
     ext = title.find("wp:extent", NS)
     body_pr = title.find(".//{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}bodyPr")
     l_ins = int(body_pr.get("lIns", 91440)) if body_pr is not None else 91440
@@ -1709,6 +1780,84 @@ def _page_no_size(root):
                 e.set(qn("w:val"), str(PAGE_NO_SZ))
 
 
+def align_tables_to_body(doc):
+    """맨 바깥 표의 왼쪽 선을 머리말 가로줄 시작에, 본문 폭 표는 오른쪽 선을 줄 끝에 딱 맞춘다(2026-10-15 사용자:
+    '머리말 줄 시작점에서 똑같이 시작해야지 왜 먼저 시작하냐'). ★워드는 표 선을 '들여쓰기 − 첫 칸 왼쪽 여백' 에 그려
+    표가 줄보다 4~5pt 왼쪽에서 시작했다(고산 실측: 줄 39.7pt, 표 34.7pt). 고친 표 수."""
+    import pdf_input as _pi
+    body_w = int(round(_pi.BOX_W_PT * 20))
+    n = 0
+    cover_end = next((i for i, el in enumerate(doc.element.body)
+                      if el.tag == qn("w:p") and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None), -1)
+    for i_el, tbl in enumerate(doc.element.body):
+        if tbl.tag != qn("w:tbl") or i_el < cover_end:
+            continue                                           # 표지 쪽 표는 양식 그대로
+        tpr = tbl.find(qn("w:tblPr"))
+        grid = tbl.find(qn("w:tblGrid"))
+        if tpr is None or grid is None:
+            continue
+        cols = grid.findall(qn("w:gridCol"))
+        try:
+            total = sum(int(float(c.get(qn("w:w")) or 0)) for c in cols)
+        except ValueError:
+            continue
+        if total <= 0:
+            continue
+        ind = tpr.find(qn("w:tblInd"))
+        try:
+            cur = int(float(ind.get(qn("w:w")) or 0)) if ind is not None else 0
+        except ValueError:
+            cur = 0
+        if tpr.find(qn("w:tblpPr")) is not None:
+            continue                                           # 떠 있는 표는 그대로
+        first_tc = tbl.find(f"{qn('w:tr')}/{qn('w:tc')}")
+        mar = 0
+        m = first_tc.find(f"{qn('w:tcPr')}/{qn('w:tcMar')}/{qn('w:left')}") if first_tc is not None else None
+        if m is None:
+            m = tpr.find(f"{qn('w:tblCellMar')}/{qn('w:left')}")
+        if m is not None:
+            try:
+                mar = int(float(m.get(qn("w:w")) or 0))
+            except ValueError:
+                mar = 0
+        else:
+            mar = 108                                          # 칸 여백을 안 정한 표(양식 표) = 워드 기본 0.19cm
+        left = cur - mar                                       # 지금 표 선 자리(본문 왼쪽 기준)
+        is_bond = "사모사채명" in _vis_text(tbl)[:40]
+        full = (total >= body_w * 0.9 and abs(left) < 400) or is_bond   # 사모사채 개요 표도 본문 폭(사용자 2번)
+        if full:                                               # 본문 폭 표 → 줄 시작~끝에 딱
+            k = body_w / total
+            acc = 0
+            for i, c in enumerate(cols):
+                w = int(round(int(float(c.get(qn("w:w")))) * k)) if i < len(cols) - 1 else body_w - acc
+                c.set(qn("w:w"), str(w))
+                acc += w
+            for tr in tbl.findall(qn("w:tr")):                 # 칸 폭도 같은 비율로
+                for tc in tr.findall(qn("w:tc")):
+                    tw = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+                    if tw is not None and (tw.get(qn("w:type")) in (None, "dxa")):
+                        try:
+                            tw.set(qn("w:w"), str(int(round(int(float(tw.get(qn("w:w")))) * k))))
+                        except ValueError:
+                            pass
+            tw_ = tpr.find(qn("w:tblW"))
+            if tw_ is not None:
+                tw_.set(qn("w:w"), str(body_w))
+                tw_.set(qn("w:type"), "dxa")
+            new_left = 0
+        else:
+            new_left = max(0, left)
+        if ind is None:
+            ind = tpr.makeelement(qn("w:tblInd"), {})
+            _put(tpr, ind)
+        ind.set(qn("w:w"), str(new_left + mar))
+        ind.set(qn("w:type"), "dxa")
+        for jc in tpr.findall(qn("w:jc")):
+            tpr.remove(jc)
+        n += 1
+    return n
+
+
 def apply_company_geometry(doc):
     """모든 구역(표지·개요·본문·연락처) 규격을 같게 + 머리말·꼬리말 가로 선을 본문 폭 그대로.
     ★양식 머리말·꼬리말 선은 고정 폭(16cm) 네모 — 규격을 바꾸면 선 길이가 본문과 안 맞는다(내곡동 6쪽 비뚤어짐)."""
@@ -2050,8 +2199,28 @@ def _major_headings(doc):
                           "title": title, "m": None})
     if boxes:
         return boxes
+    found = _para_heads(doc)
+    lv = _level(found)
+    if lv:
+        # ★번호가 차례로 이어지는데 빠진 번호(글자가 작게 줄어든 대단원 — 효자 'II. 금융구조도'·'III. 금융 조건')를 채운다
+        kind = lv[0][1]
+        have = {_num_value(kind, f[3].group(2)) for f in lv}
+        order = list(doc.element.body)
+        idx = {id(e): i for i, e in enumerate(order)}
+        for f in found:
+            if f[1] != kind or f in lv or f[2] not in order:
+                continue
+            v = _num_value(kind, f[3].group(2))
+            if v is None or v in have or f[0] < max(x[0] for x in lv) * 0.6:
+                continue
+            prev = [x for x in lv if _num_value(kind, x[3].group(2)) < v]
+            nxt = [x for x in lv if _num_value(kind, x[3].group(2)) > v]
+            if prev and nxt and idx[id(max(prev, key=lambda x: idx[id(x[2])])[2])] < idx[id(f[2])] <                     idx[id(min(nxt, key=lambda x: idx[id(x[2])])[2])]:
+                lv.append(f)
+                have.add(v)
+        lv.sort(key=lambda f: idx.get(id(f[2]), 0))
     return [{"el": p, "box": False, "kind": kind, "tok": m.group(2), "title": m.group(4).strip(), "m": m}
-            for sz, kind, p, m in _level(_para_heads(doc))]
+            for sz, kind, p, m in lv]
 
 
 def _fmt_num(kind, tok, v):
@@ -2172,6 +2341,27 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
                 rep["개요 옮김"] = f"'{between[0]['title']}' 앞으로"
                 bpos = pos(bond_head)
             hl = next((h for h in heads if h["el"] is anchor), None)   # 번호 있는 대단원일 때만 번호를 뺀다
+    # ★대단원 자체가 '금융구조도' 인 것(효자 'II. 금융구조도' + 그림) → 제목·그림을 통째로 뺀다(사용자 4번)
+    for h in list(heads):
+        if pos(h["el"]) > bpos and _STRUCT_RE.match(h["title"]) and "구조" in h["title"]:
+            nxt_h = next((x["el"] for x in heads if pos(x["el"]) > pos(h["el"])), None)
+            el, kill = h["el"].getnext(), [h["el"]]
+            ok = True
+            while el is not None and el is not nxt_h:
+                if el.tag == qn("w:tbl") or _vis_text(el).strip():
+                    ok = False                                 # 그림 말고 다른 내용이 있으면 제목만 지운다
+                    break
+                kill.append(el)
+                el = el.getnext()
+            for x in (kill if ok else [h["el"]]):
+                if x.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                    for ch in [c for c in x if c.tag != qn("w:pPr")]:
+                        x.remove(ch)
+                else:
+                    x.getparent().remove(x)
+            rep["원본 구조도 대단원 뺌"] = h["title"]
+            heads = _major_headings(doc)
+            break
     # 금융 대단원 = 개요 뒤 첫 금융 제목
     fin = next((h for h in heads if pos(h["el"]) > bpos and _FIN_TITLE_RE.search(h["title"])), None)
     style = next((h for h in heads if h["el"] is bond_head), None) or heads[0]
@@ -2188,6 +2378,48 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
         rep["금융 대단원"] = "원본에 없어 새로"
     else:
         rep["금융 대단원"] = f"원본 '{fin['title']}' → 금융 개요"
+        # ★개요와 금융 대단원 사이에 다른 대단원이 있으면(안산: 사업 개요) 금융 대단원 묶음을 개요 바로 밑으로 옮긴다(사용자 3번)
+        if any(pos(bond_last) < pos(h["el"]) < pos(fin["el"]) for h in heads):
+            nxt_h = next((h["el"] for h in heads if pos(h["el"]) > pos(fin["el"])), None)
+            block, el = [], fin["el"]
+            while el is not None and el is not nxt_h and el.tag != qn("w:sectPr"):
+                block.append(el)
+                el = el.getnext()
+            anchor = bond_last
+            for el in block:
+                if el.tag == qn("w:p") and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                    # 구역 끝 문단은 제자리에 두고(쪽 나눔 유지) 내용만 옮긴다
+                    moved = copy.deepcopy(el)
+                    moved.find(qn("w:pPr")).remove(moved.find(f"{qn('w:pPr')}/{qn('w:sectPr')}"))
+                    for ch in [c for c in el if c.tag != qn("w:pPr")]:
+                        el.remove(ch)
+                    el = moved
+                anchor.addnext(el)
+                anchor = el
+            rep["금융 대단원 옮김"] = len(block)
+        # ★개요 표 바로 밑에 이어서 '금융 개요'(새 쪽 X, 2026-10-15 사용자 3번) — 사이의 빈 문단·구역 나눔을 걷어낸다
+        between, el, ok = [], bond_last.getnext(), True
+        while el is not None and el is not fin["el"]:
+            if el.tag != qn("w:p") or _vis_text(el).strip() or el.find(".//" + qn("w:drawing")) is not None:
+                ok = False
+                break
+            between.append(el)
+            el = el.getnext()
+        if ok and el is fin["el"]:
+            for b in between:
+                b.getparent().remove(b)
+            for br in list(fin["el"].iter(qn("w:br"))):          # 제목 앞 쪽 나눔도
+                if br.get(qn("w:type")) == "page":
+                    br.getparent().remove(br)
+            ppr = fin["el"].find(qn("w:pPr")) if fin["el"].tag == qn("w:p") else None
+            if ppr is not None:
+                for e in ppr.findall(qn("w:pageBreakBefore")):
+                    ppr.remove(e)
+            gap = etree.Element(qn("w:p"))                     # 위 표와 조금 띄움
+            etree.SubElement(etree.SubElement(gap, qn("w:pPr")), qn("w:spacing"),
+                             {qn("w:before"): "240", qn("w:after"): "0"})
+            fin["el"].addprevious(gap)
+            rep["금융 개요 이어서"] = len(between)
     fin["title"] = "금융 개요"
     # 금융 대단원 안 소제목: 1. 금융 구조도, 2. 본건 기초자산 금융조건, 3.~ 원본 나머지
     nxt = next((h["el"] for h in heads if pos(h["el"]) > pos(fin["el"])), None)
@@ -2264,6 +2496,8 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
         body.remove(el)
     rep["흰 테두리 검정"] = whiten_borders_to_black(doc)
     rep["원본 구조도 줄 지움"] = drop_structure_rows(doc)
+    rep["원본 구조도 그림 지움"] = drop_structure_paragraphs(doc)
+    rep["단위 오른쪽 맞춤"] = right_align_units(doc)
     sub = _sub_heading_from_original(doc)
     tpl_bond = _template_bond_els(tpl, doc, bond, None, sub)   # 양식(최종) 사모사채 개요 표(구조도는 금융 개요 아래로)
     # ★2026-10-14 사용자 확정: 대단원 'Ⅰ. 사모사채 개요'(원본 대단원 모양) > 소제목 '1. 본건 사모사채 개요'(원본 소제목 모양) > 표
@@ -2347,6 +2581,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
         st.remove(eo)
 
     apply_company_geometry(doc)
+    rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)
 
     out = io.BytesIO()
