@@ -149,6 +149,41 @@ st.markdown("<h1 style='margin:0 0 .1rem 0;line-height:1.1;'>IM 회사양식</h1
             unsafe_allow_html=True)
 st.caption("받은 IM(PDF)을 **내용 그대로** 두고, 회사 양식(표지·머리말·로고·글꼴·표 머리글 색·연락처)만 "
            "입혀 **워드**로 만듭니다. 사모사채 개요도 넣습니다.")
+# ── 🏠 처음으로(기본 IM 변환기와 같은 버튼) — 지금 작업을 비우고 이 도구 1단계로 ──
+#   2026-10-19 사용자: '기본 빼고 나머지 3개는 처음으로 돌아가는 버튼이 없다'.
+#   런처 상태(어떤 도구를 열었는지·로그인)만 남기고 나머지 작업 상태는 모두 지운다.
+_KEEP_KEYS = ("logged_in", "tool", "_loaded_tool")
+
+
+def _reset_to_start():
+    for _k in list(st.session_state.keys()):
+        if _k not in _KEEP_KEYS:
+            del st.session_state[_k]
+    st.session_state["cf_step"] = 1
+    st.rerun()
+
+
+_hc1, _hc2 = st.columns([5, 1])
+with _hc2:
+    if st.button("🏠 처음으로", use_container_width=True, key="_home_btn",
+                 help="현재 작업을 초기화하고 1단계로 돌아갑니다."):
+        st.session_state["_show_home_confirm"] = True
+if st.session_state.get("_show_home_confirm"):
+    # ★확인 창은 '확인 중' 표시가 켜져 있는 동안 매번 그린다(누른 그 한 번만 그리면 확인 버튼이 안 먹을 수 있다)
+    def _home_body():
+        st.write("정말 처음으로 가시겠어요? 현재 작업(올린 파일·입력한 내용)이 모두 지워집니다.")
+        _d1, _d2 = st.columns(2)
+        if _d1.button("확인", type="primary", use_container_width=True, key="_home_ok"):
+            _reset_to_start()
+        if _d2.button("취소", use_container_width=True, key="_home_no"):
+            st.session_state["_show_home_confirm"] = False
+            st.rerun()
+    if hasattr(st, "dialog"):
+        st.dialog("처음으로")(_home_body)()
+    else:
+        st.warning("처음으로")
+        _home_body()
+
 render_stepper(step)
 
 
