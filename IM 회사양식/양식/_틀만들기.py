@@ -154,3 +154,10 @@ def _clear_values(m):
 
 if __name__ == "__main__":
     main()
+    # 글꼴을 회사 글꼴 두 개로(두꺼운 = Pretendard ExtraBold, 얇은 = Pretendard Light) — 2026-10-19 사용자 확정
+    import importlib.util
+    _g = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "글꼴_바꾸기.py")
+    _spec = importlib.util.spec_from_file_location("글꼴_바꾸기", _g)
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    print("글꼴 맞춤:", _mod.convert(os.path.join(os.path.dirname(os.path.abspath(__file__)), "회사양식_틀.docx")))

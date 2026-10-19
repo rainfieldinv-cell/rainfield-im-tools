@@ -277,12 +277,16 @@ def _replace_footer_business_name(slide, business_name: str):
             if "사업명" in r.text:
                 r.text = r.text.replace("사업명", business_name)
                 done = True
-        # 2) '사업명' 없이 'OldBiz｜' 형태면 구분자 앞부분만 업체명으로 교체 (run 단위, 필드 유지)
+        # 2) '사업명' 없이 'OldBiz｜' 형태면 구분자 앞부분 전체를 업체명으로 교체 (run 단위, 필드 유지)
+        #   ★예전 딜 이름이 여러 run 으로 쪼개져 있으면(새 레이아웃 '신촌지역 4-9지구 …') 구분자 run 만 바꿔
+        #     '신촌지역 4-9지구 브릿지헌인마을…' 처럼 남의 딜 이름이 앞에 남았다(2026-10-19) → 앞 run 들은 비운다.
         if not done:
-            for r in runs:
+            for k, r in enumerate(runs):
                 sep = "｜" if "｜" in r.text else ("|" if "|" in r.text else None)
                 if sep:
-                    r.text = business_name + r.text[r.text.index(sep):]
+                    for prev in runs[:k]:
+                        prev.text = ""
+                    r.text = business_name + " " + r.text[r.text.index(sep):].lstrip()
                     done = True
                     break
         if not done and runs:
@@ -573,6 +577,38 @@ def build_executive_summary_slide(prs, sections: list, business_name: str = ""):
 
     all_groups = [sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.GROUP]
 
+    # ── 0-b. ★새 레이아웃(2026-10-19): 맨 위 'Deal Highlight' 그룹(✓ 그림)은 쪽 제목이라 그대로 두고,
+    #   카드 3개 = 그림 없는 그룹 각각 [<제목> 글상자][양쪽 대괄호][본문 글상자].
+    #   예전 방식(✓ 그룹 = 카드 제목)으로 하면 'Deal Highlight' 를 카드1 제목으로 덮어쓰고
+    #   카드 제목 3개(<낮은 인허가 리스크> 등)는 다른 딜 문구가 그대로 남았다.
+    card_groups = sorted([g for g in all_groups if not _group_has_picture(g)], key=lambda s: s.top or 0)
+    _new_style = [g for g in card_groups
+                  if any(c.has_text_frame and c.text_frame.text.strip().startswith("<") for c in g.shapes)]
+    if len(_new_style) >= 3:
+        for i in range(3):
+            g = _new_style[i]
+            tbs = [c for c in g.shapes if c.shape_type == MSO_SHAPE_TYPE.TEXT_BOX]
+            tt = next((c for c in tbs if c.text_frame.text.strip().startswith("<")), None)
+            body = max([c for c in tbs if c is not tt], key=lambda c: c.width or 0, default=None)
+            sec = sections[i] if i < len(sections[:3]) else {}
+            title = (sec.get("title") or "").strip().strip("<>").strip()
+            sub = (sec.get("subtitle") or "").strip()
+            content = (sec.get("content") or "").strip()
+            if tt is not None:
+                _replace_text_frame_content(tt.text_frame, f"<{title}>" if title else "")
+                tt.text_frame.word_wrap = False      # 제목 길이만큼 옆으로(꺾이지 않게)
+            if body is not None:
+                lines = ([sub] if sub else []) + [l.strip().lstrip("→·-•▶ㆍ").strip()
+                                                  for l in content.split("\n") if l.strip()]
+                _replace_text_frame_content(body.text_frame, "\n".join(lines))
+                for _p in body.text_frame.paragraphs:
+                    for _r in _p.runs:
+                        _r.font.size = _Pt(11)
+                        _r.font.color.rgb = RGBColor(0, 0, 0)
+                        _r.font.name = FONT_LIGHT
+        _replace_footer_business_name(slide, business_name)
+        return slide
+
     # ── 1. 제목 그룹 = ✓ 아이콘(그림) 포함 그룹 (없으면 전체 그룹)
     title_groups = [g for g in all_groups if _group_has_picture(g)] or all_groups
     title_groups = sorted(title_groups, key=lambda s: s.top or 0)
@@ -647,6 +683,114 @@ def build_executive_summary_slide(prs, sections: list, business_name: str = ""):
     # ── 5. 하단 사업명 푸터 교체 (좌·우 어디든 텍스트로 찾음, 페이지번호 유지) ──
     _replace_footer_business_name(slide, business_name)
 
+    return slide
+
+
+# ─────────────────────────────────────────────
+# (b-2) Overview 하이라이트 쪽 — 글 상자 + 원본 사진(자르지 않음)
+# ─────────────────────────────────────────────
+def _overview_runs(p_elem, text, rpr_tpl):
+    """한 줄을 run 들로. '**굵게**' 부분은 굵은 글꼴(Pretendard Variable ExtraBold) + 밑줄(레이아웃 예시와 같게)."""
+    import re as _re
+    parts = _re.split(r"(\*\*[^*]+\*\*)", text)
+    for part in parts:
+        if not part:
+            continue
+        bold = part.startswith("**") and part.endswith("**")
+        txt = part[2:-2] if bold else part
+        r = etree.SubElement(p_elem, _qn('a:r'))
+        rpr = copy.deepcopy(rpr_tpl) if rpr_tpl is not None else etree.Element(_qn('a:rPr'))
+        for tag in ('a:latin', 'a:ea', 'a:cs'):
+            e = rpr.find(_qn(tag))
+            if e is None:
+                e = etree.SubElement(rpr, _qn(tag))
+            e.set('typeface', FONT_BOLD if bold else FONT_LIGHT)
+        if bold:
+            rpr.set('u', 'sng')
+        else:
+            rpr.attrib.pop('u', None)
+        rpr.attrib.pop('b', None)
+        r.insert(0, rpr)
+        t = etree.SubElement(r, _qn('a:t'))
+        t.text = txt
+
+
+def _est_text_height_in(lines, width_in, pt=11.0, spacing=1.5):
+    """글 높이 어림(인치) — 한 줄 폭에 들어가는 글자 수로 줄 수를 센다(한글 ≈0.86em, 영숫자 ≈0.56em)."""
+    import math
+    total = 0
+    for ln in lines:
+        w = sum(0.86 if ord(ch) > 0x2E80 else (0.3 if ch == " " else 0.56) for ch in ln.replace("**", ""))
+        cap = max(1.0, width_in * 72.0 / pt)
+        total += max(1, math.ceil(w / cap))
+    return total * pt * spacing / 72.0
+
+
+def build_overview_slide(prs, text: str, image_bytes: bytes = None, business_name: str = ""):
+    """레이아웃 'Overview' 쪽(글 상자 + 사진). ★사진은 자르지 않는다 — 원본 비율 그대로,
+    레이아웃 사진 자리(가로 7.33in × 세로 3.05in)에 최대한 크게 들어가게 줄이거나 늘린다
+    (예: 원본 4:8 이면 1:2 비율 그대로). 글은 레이아웃 글 상자 서식(→ 글머리, 11pt, Pretendard Light)."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    slide = clone_slide_layout(prs, "overview")
+    E = 914400
+    box = max([sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.TEXT_BOX
+               and E * 1.0 < (sh.top or 0) < E * 6.5],
+              key=lambda sh: (sh.width or 0) * (sh.height or 0), default=None)
+    pic = max([sh for sh in slide.shapes if sh.shape_type == MSO_SHAPE_TYPE.PICTURE
+               and (sh.width or 0) > E * 3], key=lambda sh: sh.width or 0, default=None)
+    slot = (pic.left, pic.top, pic.width, pic.height) if pic is not None else \
+        (int(E * 1.75), int(E * 3.58), int(E * 7.33), int(E * 3.05))
+    if pic is not None:
+        pic._element.getparent().remove(pic._element)
+
+    lines = [l.rstrip() for l in (text or "").split("\n") if l.strip()]
+    if box is not None:
+        txBody = box.text_frame._txBody
+        first_p = txBody.find(_qn('a:p'))
+        ppr0 = first_p.find(_qn('a:pPr')) if first_p is not None else None
+        pPr = copy.deepcopy(ppr0) if ppr0 is not None else None
+        r0 = first_p.find(_qn('a:r')) if first_p is not None else None
+        rpr0 = r0.find(_qn('a:rPr')) if r0 is not None else None
+        rpr_tpl = copy.deepcopy(rpr0) if rpr0 is not None else None
+        for old in list(txBody.findall(_qn('a:p'))):
+            txBody.remove(old)
+        for ln in lines or [""]:
+            np_ = etree.SubElement(txBody, _qn('a:p'))
+            if pPr is not None:
+                np_.insert(0, copy.deepcopy(pPr))
+            _overview_runs(np_, ln.lstrip("→·-•▶ㆍ ").strip(), rpr_tpl)
+        # 글 상자 높이는 우리가 정한다(자동 맞춤이면 열 때 사진 자리를 무시하고 줄어든다)
+        bp = txBody.find(_qn('a:bodyPr'))
+        if bp is not None:
+            for ch in list(bp):
+                if ch.tag in (_qn('a:spAutoFit'), _qn('a:normAutofit'), _qn('a:noAutofit')):
+                    bp.remove(ch)
+            etree.SubElement(bp, _qn('a:noAutofit'))
+        text_h = _est_text_height_in(lines, (box.width / E) - 0.16 - 0.32)
+        text_bottom = box.top + int(E * (0.08 + text_h))
+    else:
+        text_bottom = slot[1]
+
+    if image_bytes:
+        from PIL import Image as _PI
+        im = _PI.open(io.BytesIO(image_bytes))
+        iw, ih = im.size
+        top = max(slot[1], text_bottom + int(E * 0.12))
+        max_w, max_h = slot[2], min(slot[3], int(E * 6.95) - top)
+        max_h = max(max_h, int(E * 1.0))           # 글이 길어 자리가 모자라도 최소 1in
+        k = min(max_w / iw, max_h / ih)            # ★비율 그대로(자르지 않음)
+        w, h = int(iw * k), int(ih * k)
+        left = slot[0] + (slot[2] - w) // 2        # 사진 자리 가운데
+        buf = io.BytesIO()
+        (im if im.mode in ("RGB", "L") else im.convert("RGB")).save(buf, "PNG")
+        buf.seek(0)
+        slide.shapes.add_picture(buf, left, top, width=w, height=h)
+        bottom = top + h
+    else:
+        bottom = text_bottom
+    if box is not None:
+        box.height = max(int(E * 1.0), bottom + int(E * 0.15) - box.top)
+    _replace_footer_business_name(slide, business_name)
     return slide
 
 
@@ -864,7 +1008,7 @@ def build_test_cover():
     saved = save_presentation(prs, output_path)
 
     print(f"[완료] 파일 저장: {saved}")
-    print("  → PowerPoint에서 열어 A4 크기 및 피플폰트 적용 여부를 확인하세요.")
+    print("  → PowerPoint에서 열어 A4 크기 및 Pretendard 적용 여부를 확인하세요.")
     return saved
 
 
@@ -1456,6 +1600,7 @@ def build_full_presentation(
     cover_image_bytes: bytes = None,
     executive_summary_sections: list = None,
     section_image_bytes_list: list = None,
+    overview: dict = None,
     toc_count: int = None,
     toc_image_bytes_list: list = None,
     toc_map: dict = None,
@@ -1494,6 +1639,10 @@ def build_full_presentation(
 
     # ── 1. 표지 ────────────────────────────────────────────
     build_cover_slide(prs, business_name, year, month_en, cover_image_bytes)
+
+    # ── 1-b. Overview 하이라이트 (글 + 사진) — 2026-10-19 새 레이아웃 ─────────────
+    if overview and ((overview.get("text") or "").strip() or overview.get("image")):
+        build_overview_slide(prs, overview.get("text") or "", overview.get("image"), business_name)
 
     # ── 2. Investment Highlights / Executive Summary (선택) ───────────────────────
     #   exec_summary_data(generate_executive_summary 결과)가 있으면 고정형식 빌더 우선

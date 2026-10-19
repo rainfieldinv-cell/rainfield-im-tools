@@ -3,7 +3,7 @@
 
 원본 IM 워드(.docx)를 바탕으로 두고 회사 양식만 입힌다. 본문 내용·글씨 크기·쪽 방향은 건드리지 않는다.
 
-  1. 글꼴        → Pretendard (보통 글씨 'Pretendard Light', 굵은 글씨 'Pretendard')
+  1. 글꼴        → Pretendard (보통 글씨 'Pretendard Light', 굵은 글씨 'Pretendard ExtraBold')
                     ※ 'Pretendard Light' 에 굵게를 걸면 워드가 가짜로 두껍게 그려서, 굵은 글씨는 일반 굵기 계열로
   2. 표 머리글   → 네이비(17365D) + 흰 글씨. 나머지 칸은 원본 그대로(붕어빵과 같은 규칙)
   3. 원본 표지   → 뺀다 (첫 '쪽 나눔' 앞까지)
@@ -38,7 +38,7 @@ TEMPLATE_CANDIDATES = [os.path.join(HERE, "양식", "회사양식_틀.docx"),
 NAVY = "17365D"           # 표 머리글 (사용자 양식 연락처 표와 같은 색)
 LABEL = "F2F2F2"          # 사모사채 개요 구분 칸
 FONT_LIGHT = "Pretendard Light"
-FONT_BOLD = "Pretendard"
+FONT_BOLD = "Pretendard ExtraBold"   # 2026-10-19 사용자: 두꺼운 글씨 = Pretendard ExtraBold
 SYMBOL_FONTS = {"wingdings", "wingdings 2", "wingdings 3", "symbol", "webdings", "marlett",
                 "mt extra", "segoe ui symbol", "segoe ui emoji"}
 
@@ -167,6 +167,15 @@ def _style_bold(styles_el):
     return out
 
 
+def _font_weight(rpr, bold):
+    """굵은 글씨 = 'Pretendard ExtraBold' 글꼴 자체로(굵게 표시는 끔). ★굵게까지 켜 두면 워드가 ExtraBold 를
+    한 번 더 가짜로 두껍게 그려 뭉개진다. 얇은 글씨 = 'Pretendard Light'."""
+    _set_rfonts(rpr, FONT_BOLD if bold else FONT_LIGHT)
+    if bold:
+        for tag in ("w:b", "w:bCs"):
+            _put(rpr, rpr.makeelement(qn(tag), {qn("w:val"): "0"}))
+
+
 def apply_fonts(doc):
     styles_el = doc.styles.element
     bold_of = _style_bold(styles_el)
@@ -176,7 +185,7 @@ def apply_fonts(doc):
         while st is not None and st.tag != qn("w:style"):
             st = st.getparent()
         bold = bold_of.get(st.get(qn("w:styleId")), False) if st is not None else False
-        _set_rfonts(rpr, FONT_BOLD if bold else FONT_LIGHT)
+        _font_weight(rpr, bold)
     dd = styles_el.find(qn("w:docDefaults"))
     if dd is not None:
         rprd = dd.find(qn("w:rPrDefault"))
@@ -213,7 +222,7 @@ def apply_fonts(doc):
         direct = _on(rpr, "w:b")
         bold = direct if direct is not None else (
             bold_of.get(rs.get(qn("w:val")), False) if rs is not None else bold_of.get(ps, False))
-        _set_rfonts(rpr, FONT_BOLD if bold else FONT_LIGHT)
+        _font_weight(rpr, bold)
     # 번호·글머리표(기호 글꼴은 그대로)
     try:
         num = doc.part.numbering_part.element
@@ -1443,9 +1452,12 @@ def _import_styles(tpl, doc, root):
 def _run(p, text, size, bold=False, color=None, font=None):
     r = p.add_run(text)
     r.font.size = Pt(size)
-    r.bold = bold
     rpr = r._r.get_or_add_rPr()
-    _set_rfonts(rpr, font or (FONT_BOLD if bold else FONT_LIGHT))
+    if font:
+        r.bold = bold
+        _set_rfonts(rpr, font)
+    else:
+        _font_weight(rpr, bold)
     if color:
         from docx.shared import RGBColor
         r.font.color.rgb = RGBColor.from_string(color)
@@ -1614,8 +1626,8 @@ def _make_sub_heading(src, n, title):
         etree.SubElement(ppr, qn("w:spacing"), {qn("w:before"): "120", qn("w:after"): "120"})
         r = etree.SubElement(p, qn("w:r"))
         rpr = etree.SubElement(r, qn("w:rPr"))
-        etree.SubElement(rpr, qn("w:b"))
         etree.SubElement(rpr, qn("w:sz"), {qn("w:val"): "22"})
+        _font_weight(rpr, True)
         etree.SubElement(r, qn("w:t")).text = f"{n}. {title}"
         return p
     p0, kind, m = src

@@ -130,6 +130,34 @@ def generate_executive_summary(pdf_text: str) -> dict:
 
 
 # ════════════════════════════════════════════════════════
+# Overview 하이라이트 (표지 다음 쪽 — 글 + 사진) — 2026-10-19 새 레이아웃
+# ════════════════════════════════════════════════════════
+OVERVIEW_SYSTEM_PROMPT = """당신은 부동산 PF 투자제안서 작성 전문가입니다.
+주어진 원본 IM 의 'Executive Summary/사업 개요' 텍스트를 읽고, 제안서 첫 장 'Overview' 에 들어갈
+문장 3~4개를 만듭니다.
+
+[규칙]
+1. 원문에 실제로 있는 사실만. 숫자·날짜·회사명은 원문 그대로. 없는 내용은 만들지 마라.
+2. 각 문장은 한 포인트(사업 구조/시행·시공/인허가·토지/금융 조달 등). 문장 끝은 '~임', '~함', '~하였음' 체.
+3. 각 문장에서 가장 중요한 부분(핵심 숫자·결론) 하나를 **굵게** 로 감싼다(문장당 0~1곳).
+4. 한 문장은 120자 이내. 한국어. JSON 만 출력.
+
+[JSON]
+{"lines": ["문장1", "문장2", "문장3"]}"""
+
+
+def generate_overview(pdf_text: str) -> dict:
+    """Overview 쪽 글(3~4줄)을 Claude 로 만든다. 반환: call_claude() 결과(data = {"lines": [...]})."""
+    return call_claude(
+        system_prompt=OVERVIEW_SYSTEM_PROMPT,
+        user_prompt="[원문]\n" + pdf_text + "\n\n위 내용으로 Overview 문장 3~4개를 JSON 으로.",
+        slide_num=21,
+        pdf_context=pdf_text,
+        prompt_version="overview_v1",
+    )
+
+
+# ════════════════════════════════════════════════════════
 # 목차(TOC) 자동 추출 — IM 전체를 읽어 섹션/소제목 구성
 # ════════════════════════════════════════════════════════
 
@@ -755,8 +783,8 @@ def style_table(sh, *, nested=False, has_header=False, label_cols=(0,),
 
     - 여백: 기본 0 / 좌측정렬→marL=0.3cm / 우측정렬→marR=0.3cm / 가운데→전부 0
     - 글씨: 일반표 10.5pt, 중첩표(nested=True) 10pt
-    - Bold/Light: 헤더행(has_header & row0)·구분열(label_cols)=피플폰트 Bold,
-                  세부내용=피플폰트 Light  (font.bold 속성은 쓰지 않고 폰트명으로 굵기 표현)
+    - Bold/Light: 헤더행(has_header & row0)·구분열(label_cols)=Pretendard Variable ExtraBold,
+                  세부내용=Pretendard Light  (font.bold 속성은 쓰지 않고 폰트명으로 굵기 표현)
     - 색: header_fill(헤더행)·value_fill(값셀) 지정 시 적용, 미지정이면 기존 유지
           (헤더 08377C, 구분/값 회색 D9D9D9, 강조 3E95BE 등은 호출부에서 지정)
     - 정렬: 가로 기본 가운데(미지정 시), 세로 항상 가운데(MIDDLE)
@@ -807,7 +835,7 @@ def style_table(sh, *, nested=False, has_header=False, label_cols=(0,),
             cell.vertical_anchor = MSO_ANCHOR.MIDDLE       # 세로 항상 가운데
             is_header_cell = has_header and ri == 0
             is_bold = is_header_cell or (ci in label_cols)
-            fname = "피플폰트 Bold" if is_bold else "피플폰트 Light"
+            fname = "Pretendard Variable ExtraBold" if is_bold else "Pretendard Light"
             # 헤더(색칠된 셀) 글자=흰색, 그 외(구분·내용)=검정
             fcolor = _C_WHITE if is_header_cell else RGBColor(0, 0, 0)
             for p in tf.paragraphs:
@@ -864,14 +892,14 @@ def clean_bullet(tf, marL=171450, indent=-171450):
 # 전 슬라이드 공통 푸터 사업명 (딜별 기본값 — business_name 인자로 덮어쓸 수 있음)
 _FOOTER_BIZ = "천안 부성2지구 도시개발사업"
 _FOOTER_GRAY = RGBColor(0x80, 0x80, 0x80)
-_FONT_LIGHT = "피플폰트 Light"
+_FONT_LIGHT = "Pretendard Light"
 
 
 def add_footer(slide, page_num, source=None, business_name=None):
     """전 슬라이드 공통 푸터 (형식 고정).
 
-    - 오른쪽 아래: "{사업명}  |  {page_num}"  (피플폰트 Light 8pt, 808080, 우측정렬)
-    - 왼쪽 아래(source 있을 때만): "출처: {source}"  (피플폰트 Light 9pt, 808080, 좌측정렬)
+    - 오른쪽 아래: "{사업명}  |  {page_num}"  (Pretendard Light 8pt, 808080, 우측정렬)
+    - 왼쪽 아래(source 있을 때만): "출처: {source}"  (Pretendard Light 9pt, 808080, 좌측정렬)
     - page_num 은 PPT 슬라이드 순서(slides 인덱스+1) 권장
     - 두 텍스트박스 모두 내부 여백 0
     기존 푸터성 텍스트박스(name 에 "슬라이드 번호" 포함)는 먼저 삭제 후 새로 생성.
@@ -1232,7 +1260,7 @@ def build_slide_7_investment_structure(prs, data: dict,
         _set_body(t_lender, 2, "Tr.B")
 
     # ── STEP 3: 화살표(연결선) + 라벨을 PDF p4 배치대로 그림 ──
-    _FONT_BOLD = "피플폰트 Bold"   # 라벨 폰트 (레이아웃 따름)
+    _FONT_BOLD = "Pretendard Variable ExtraBold"   # 라벨 폰트 (레이아웃 따름)
     _C_ARROW = RGBColor(0x40, 0x40, 0x40)   # 진회색
 
     def _arrow(x1, y1, x2, y2, *, double, bent=False, adj1=None):
@@ -1276,7 +1304,7 @@ def build_slide_7_investment_structure(prs, data: dict,
         p.alignment = PP_ALIGN.CENTER
         run = p.add_run()
         run.text = text
-        run.font.name = _FONT_BOLD      # 화살표 라벨도 "피플폰트 Bold" (레이아웃 따름)
+        run.font.name = _FONT_BOLD      # 화살표 라벨도 "Pretendard Variable ExtraBold" (레이아웃 따름)
         run.font.size = Pt(9)
         run.font.color.rgb = RGBColor(0, 0, 0)
         return tb

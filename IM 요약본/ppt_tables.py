@@ -18,8 +18,8 @@ from pptx.dml.color import RGBColor
 from pptx.oxml.ns import qn
 
 FONT_PT = 9.0                       # ★9pt 고정(사용자 지시)
-FONT_NAME = "피플폰트 Light"
-HEAD_FONT = "피플폰트 Bold"
+FONT_NAME = "Pretendard Light"
+HEAD_FONT = "Pretendard ExtraBold"
 LINE = RGBColor(0xA5, 0xA5, 0xA5)   # 회사 표 테두리색
 HEAD_BG = RGBColor(0xF2, 0xF4, 0xF7)
 PAD = Inches(0.04)

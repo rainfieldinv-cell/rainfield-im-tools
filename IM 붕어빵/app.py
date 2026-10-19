@@ -238,7 +238,7 @@ elif step == 2:
                            mime="application/vnd.openxmlformats-officedocument."
                                 "presentationml.presentation",
                            type="primary")
-        st.caption("⚠️ 글꼴은 파일에 담기지 않습니다. 피플폰트가 깔린 컴퓨터에서 열어야 "
+        st.caption("⚠️ 글꼴은 파일에 담기지 않습니다. Pretendard(ExtraBold·Light)가 깔린 컴퓨터에서 열어야 "
                    "원본과 같은 모습으로 보입니다.")
 
     st.markdown("---")

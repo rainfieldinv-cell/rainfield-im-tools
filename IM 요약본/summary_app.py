@@ -193,7 +193,7 @@ hr{border-color:#dfe6f0;}
 """, unsafe_allow_html=True)
 
 st.title("Rainfield 요약본 자동 생성기")
-st.caption("원본 IM(PDF) → 4~5장 요약본")
+st.caption("원본 IM(PDF) → 5~6장 요약본")
 render_stepper(step)
 data = st.session_state.get("data")
 
@@ -220,6 +220,9 @@ if step == 1:
                 while len(hl) < 3:
                     hl.append({"title": "", "subtitle": "", "bullets": []})
                 st.session_state["hl"] = hl
+                _ov0 = d.get("overview") or []
+                st.session_state["ov_lines"] = "\n".join(str(x).strip() for x in (
+                    _ov0 if isinstance(_ov0, list) else str(_ov0).split("\n")) if str(x).strip())
                 # 다른 PDF를 올렸는데 앞 원본의 카드 글이 남지 않도록 위젯도 갈아끼운다.
                 for _i in range(3):
                     _sub = (hl[_i].get("subtitle") or "").strip()
@@ -394,7 +397,7 @@ elif step == 2:
                     h["use_sub"] = st.checkbox("부제목 넣기", key=f"hu_{i}")
                     if h["use_sub"]:
                         h["subtitle"] = st.text_input(
-                            "부제목 (하늘색 줄)", key=f"hs_{i}",
+                            "부제목 (본문 첫 줄로 들어갑니다)", key=f"hs_{i}",
                             placeholder="예: 주요 심의·평가 완료 단계")
                     else:
                         h["subtitle"] = ""
@@ -402,6 +405,15 @@ elif step == 2:
                         "내용", key=f"hb_{i}", height=110,
                         placeholder="카드 본문 (여러 줄 입력 가능)"
                         ).split("\n") if b.strip()]
+
+        # ── Overview 글(내용 1쪽 맨 위 'Overview' 칸) ──
+        st.markdown("---")
+        st.markdown("#### 📝 Overview 글")
+        st.caption("내용 첫 쪽 왼쪽 맨 위 'Overview' 칸에 들어갑니다. 한 줄 = 한 문장(앞에 → 가 자동으로 붙습니다). "
+                   "원본에서 뽑은 문장을 미리 넣어 두었으니 고칠 곳만 고치세요.")
+        st.session_state.setdefault("ov_lines", "")
+        st.text_area("Overview 글", key="ov_lines", height=140, label_visibility="collapsed",
+                     placeholder="예) 본 사업은 서울특별시 마포구 노고산동 일원 재개발사업으로 …")
 
         # ── 완성본 미리보기 (실제 슬라이드를 만들어 이미지로) ──
         st.markdown("---")
@@ -652,87 +664,79 @@ elif step == 4:
         # 원본에서 찾은 것만 고를 수 있게
         _loan = data.get("담보대출조건") or {}
         AVAIL = {
-            "사모사채개요": bool(data.get("사모사채개요") or _loan),
-            "담보대출조건": bool(_loan),
-            "대출조건표":   bool(_loan.get("tranches")),   # Tr.A/B 금액·LTV·금리 표(따로 배치 가능)
+            "Overview":     True,                         # 하이라이트 단계에서 쓴 Overview 글
+            "사모사채개요": True,
+            "담보대출조건": bool(_loan),                  # Tr 표가 칸 안에 같이 들어간다
+            "사업개요":     bool(data.get("사업개요")),
             "사업일정":     bool(data.get("사업일정")),
             "법인개요":     bool(data.get("법인개요")),
             "재무제표":     bool(data.get("재무제표")),
             "조감도":       bool(data.get("이미지_있음", True)),
-            # ★금융구조도는 **항상** 목록에 둔다(필수 항목).
-            #   3단계에서 안 만들었으면 그 자리만 비고, 나머지는 그대로 만들어진다.
+            # ★금융구조도는 **항상** 목록에 둔다(필수 항목). 3단계에서 안 만들었으면 그 자리만 빈다.
             "금융구조도":   True,
         }
-        # ★원본 IM 의 **표**를 그대로 고른다.
-        #   글로 옮기면 요약본이 아니다 — 원문에 표로 돼 있으면 표를 넣는다.
-        _SEP = "──── 원본에 있는 표 ────"           # 고르면 (비움)으로 친다
+        from summary_pipeline import extra_blocks_of as _xb
+        for _t, _ in _xb(data):
+            if _t not in AVAIL and _t != "사업개요":
+                AVAIL[_t] = True                          # 원본에서 찾은 그 밖의 내용
+        _SEP = "──── 원본에 있는 표 ────"
         _TBLS = _orig_tables(st.session_state.get("_pdf_bytes"))
         EXTRA = [f"{t['key']} {t['title']}"[:46] for t in _TBLS]
         OPTS = ["(비움)"] + [k for k, v in AVAIL.items() if v]
         if EXTRA:
             OPTS += [_SEP] + EXTRA
         MISSING = [k for k, v in AVAIL.items() if not v]
-        if not (st.session_state.get("diag_bytes")
-                or st.session_state.get("diag_png")):
+        if not (st.session_state.get("diag_bytes") or st.session_state.get("diag_png")):
             st.info("**금융구조도**는 목록에 있지만 아직 만들지 않았습니다. "
-                    "3단계로 돌아가 만들면 그 자리에 들어갑니다. "
-                    "안 만들면 그 자리만 비고 나머지는 정상으로 만들어집니다.")
+                    "3단계로 돌아가 만들면 그 자리에 들어갑니다.")
         if _TBLS:
             st.caption(f"원본에서 표 **{len(_TBLS)}개**를 찾았습니다. "
                        "목록 아래쪽에서 고르면 그 표가 **원본 모양 그대로** 들어갑니다.")
 
-        # ── 페이지 수 먼저 고른다(1장이냐 2장이냐에 따라 아래 배치가 달라짐) ──
-        st.session_state.setdefault("pages", 1)
-        npages = st.radio("핵심요약 페이지 수", [1, 2], horizontal=True,
-                          index=st.session_state["pages"] - 1,
-                          format_func=lambda x: f"{x}페이지")
+        # ── 총 장수 먼저(표지 + Deal Highlight + 내용 쪽 + 끝 쪽) ──
+        st.session_state.setdefault("total_pages", 5)
+        _tot = st.radio("요약본 총 장수", [5, 6], horizontal=True,
+                        index=[5, 6].index(st.session_state["total_pages"])
+                        if st.session_state["total_pages"] in (5, 6) else 0,
+                        format_func=lambda x: f"{x}장 (내용 {x - 3}쪽)")
+        st.session_state["total_pages"] = _tot
+        npages = _tot - 3
         st.session_state["pages"] = npages
-        st.caption("한 장에 안 들어가면 2페이지로 나누세요. 생성 후 넘치면 경고가 뜹니다.")
+        st.caption("5장 = 표지 · Deal Highlight · 내용 2쪽 · 끝 쪽 / 6장 = 내용이 3쪽. "
+                   "한 쪽에 안 들어가면 생성 후 넘침 경고가 뜹니다.")
         st.markdown("---")
-        if npages == 2:
-            st.markdown("#### 1페이지 (첫째 장)")
 
-        st.session_state.setdefault("slots", {
-            # 금융구조도는 기본으로 넣는다(3단계에서 만들었으면 자동으로 들어감)
-            "left":  ["사모사채개요", "담보대출조건", "금융구조도"],
-            "right": ["조감도", "사업일정", "법인개요", "재무제표"],
-        })
-        st.session_state.setdefault("slots2", {"left": ["법인개요", "재무제표"],
-                                               "right": []})
-        S = st.session_state["slots"]
-        S2 = st.session_state["slots2"]
+        _DEFAULTS = [
+            {"left": ["Overview", "사모사채개요", "금융구조도"], "right": ["담보대출조건"]},
+            {"left": ["사업개요", "조감도"], "right": ["사업일정"]},
+            {"left": ["법인개요"], "right": ["재무제표"]},
+        ]
+        _sp = st.session_state.setdefault("slots_pages", [dict(left=list(d["left"]), right=list(d["right"]))
+                                                           for d in _DEFAULTS])
+        while len(_sp) < 3:
+            _sp.append({"left": [], "right": []})
 
         def _clear_slot_widgets(tag, side, n, seq=None):
-            """칸을 지우거나 옮긴 뒤, 각 칸의 선택값을 **다시 써 넣는다.**
-
-            ★지우기만 하면 안 된다. 3번을 지워도 4·5번 위젯에 옛 값이 남아
-              한 칸씩 밀려 보이고, 결국 **맨 끝이 지워진 것처럼** 된다.
-              (사업일정을 지웠는데 맨 밑이 사라지던 원인)
-            """
             for j in range(n + 4):
                 st.session_state.pop(f"sl{tag}_{side}_{j}", None)
             if seq is not None:
                 for j, v in enumerate(seq):
                     st.session_state[f"sl{tag}_{side}_{j}"] = v
 
-        # ★칸을 하나씩 추가·수정·삭제·이동한다(칸 수를 한꺼번에 정하지 않음).
         def _slot_editor(store, tag, side, title):
             st.markdown(f"**{title}**")
             seq = store.setdefault(side, [])
             for i in range(len(seq)):
                 c1, c2, c3, c4 = st.columns([6, 1, 1, 1])
                 cur = seq[i] if seq[i] in OPTS else "(비움)"
-                _pick = c1.selectbox(
-                    f"{i + 1}번 칸", OPTS, index=OPTS.index(cur),
-                    key=f"sl{tag}_{side}_{i}", label_visibility="collapsed")
-                seq[i] = "(비움)" if _pick == _SEP else _pick    # 구분선은 고를 수 없다
-                if c2.button("↑", key=f"up{tag}_{side}_{i}", disabled=(i == 0),
-                             help="위로"):
+                _pick = c1.selectbox(f"{i + 1}번 칸", OPTS, index=OPTS.index(cur),
+                                     key=f"sl{tag}_{side}_{i}", label_visibility="collapsed")
+                seq[i] = "(비움)" if _pick == _SEP else _pick
+                if c2.button("↑", key=f"up{tag}_{side}_{i}", disabled=(i == 0), help="위로"):
                     seq[i - 1], seq[i] = seq[i], seq[i - 1]
                     _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
-                if c3.button("↓", key=f"dn{tag}_{side}_{i}",
-                             disabled=(i == len(seq) - 1), help="아래로"):
+                if c3.button("↓", key=f"dn{tag}_{side}_{i}", disabled=(i == len(seq) - 1), help="아래로"):
                     seq[i + 1], seq[i] = seq[i], seq[i + 1]
                     _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
@@ -740,79 +744,50 @@ elif step == 4:
                     seq.pop(i)
                     _clear_slot_widgets(tag, side, len(seq) + 2, seq)
                     st.rerun()
-            if st.button("＋ 칸 추가", key=f"add{tag}_{side}",
-                         disabled=(len(seq) >= 6), use_container_width=True):
+            if st.button("＋ 칸 추가", key=f"add{tag}_{side}", disabled=(len(seq) >= 6),
+                         use_container_width=True):
                 seq.append("(비움)")
                 st.rerun()
-
-        cL, cR = st.columns(2)
-        with cL:
-            _slot_editor(S, "", "left", "왼쪽 단")
-        with cR:
-            _slot_editor(S, "", "right", "오른쪽 단")
-        nL, nR = len(S["left"]), len(S["right"])
-
-        # ── A4 미리보기 (가로 10.83 x 7.5 비율) ──────────
-        def _cells(side, n):
-            out = ""
-            for i in range(n):
-                v = S[side][i] if i < len(S[side]) else "(비움)"
-                empty = (v == "(비움)")
-                out += (f'<div class="cell{" empty" if empty else ""}">'
-                        f'{"" if empty else v}</div>')
-            return out
 
         st.markdown("""
         <style>
         .a4{width:100%;max-width:900px;aspect-ratio:10.83/7.5;border:1px solid #c9d2e3;
-            background:#fff;display:flex;gap:8px;padding:10px;box-sizing:border-box;
-            margin:6px 0 2px 0;}
+            background:#fff;display:flex;gap:8px;padding:10px;box-sizing:border-box;margin:6px 0 2px 0;}
         .col{flex:1;display:flex;flex-direction:column;gap:8px;}
-        .cell{flex:1;border:1px solid #08377C;background:#eef3fa;color:#08377C;
-              border-radius:3px;display:flex;align-items:center;justify-content:center;
-              font-size:13px;font-weight:700;text-align:center;}
+        .cell{flex:1;border:1px solid #08377C;background:#eef3fa;color:#08377C;border-radius:3px;
+              display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;text-align:center;}
         .cell.empty{border:1px dashed #c9d2e3;background:#fafbfc;color:#c9d2e3;}
-        </style>
-        """, unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="a4"><div class="col">{_cells("left", nL)}</div>'
-            f'<div class="col">{_cells("right", nR)}</div></div>',
-            unsafe_allow_html=True)
-        st.caption("실제 높이는 내용 양에 맞춰 자동으로 조절됩니다. "
-                   "위 그림은 어디에 무엇이 들어가는지 순서만 보여줍니다.")
+        </style>""", unsafe_allow_html=True)
 
+        def _cells(store, side):
+            out = ""
+            for v in store.get(side, []):
+                empty = (v == "(비움)")
+                out += f'<div class="cell{" empty" if empty else ""}">{"" if empty else v}</div>'
+            return out or '<div class="cell empty"></div>'
+
+        for k in range(npages):
+            S = _sp[k]
+            st.markdown(f"#### 내용 {k + 1}쪽 (전체 {k + 3}번째 장)")
+            cL, cR = st.columns(2)
+            with cL:
+                _slot_editor(S, str(k + 1), "left", "왼쪽 단")
+            with cR:
+                _slot_editor(S, str(k + 1), "right", "오른쪽 단")
+            st.markdown(f'<div class="a4"><div class="col">{_cells(S, "left")}</div>'
+                        f'<div class="col">{_cells(S, "right")}</div></div>', unsafe_allow_html=True)
+            st.markdown("---")
+        st.caption("실제 높이는 내용 양에 맞춰 자동으로 조절됩니다. 위 그림은 어디에 무엇이 들어가는지 순서만 보여줍니다.")
+        _seen, _dup = set(), set()
+        for k in range(npages):
+            for x in _sp[k]["left"] + _sp[k]["right"]:
+                if x != "(비움)":
+                    (_dup if x in _seen else _seen).add(x)
+        if _dup:
+            st.warning("여러 쪽에 같은 항목이 있습니다 : " + ", ".join(sorted(_dup))
+                       + " — 한쪽에서 빼주세요(내용이 중복됩니다).")
         if MISSING:
             st.info("원본에서 못 찾아 고를 수 없는 항목 : " + ", ".join(MISSING))
-
-        # ── 2페이지면 두 번째 장도 배치 ────────────────
-        if npages == 2:
-            st.markdown("---")
-            st.markdown("#### 2페이지 (둘째 장)")
-            d1, d2 = st.columns(2)
-            with d1:
-                _slot_editor(S2, "2", "left", "왼쪽 단")
-            with d2:
-                _slot_editor(S2, "2", "right", "오른쪽 단")
-            nL2, nR2 = len(S2["left"]), len(S2["right"])
-
-            def _cells2(side, n):
-                out = ""
-                for i in range(n):
-                    v = S2[side][i] if i < len(S2[side]) else "(비움)"
-                    empty = (v == "(비움)")
-                    out += (f'<div class="cell{" empty" if empty else ""}">'
-                            f'{"" if empty else v}</div>')
-                return out or '<div class="cell empty"></div>'
-
-            st.markdown(
-                f'<div class="a4"><div class="col">{_cells2("left", nL2)}</div>'
-                f'<div class="col">{_cells2("right", nR2)}</div></div>',
-                unsafe_allow_html=True)
-            _dup = set(x for x in S["left"] + S["right"] if x != "(비움)") & \
-                   set(x for x in S2["left"] + S2["right"] if x != "(비움)")
-            if _dup:
-                st.warning("1·2페이지에 같은 항목이 있습니다 : " + ", ".join(_dup)
-                           + " — 한쪽에서 빼주세요(둘 다 만들면 내용이 중복됩니다).")
     st.markdown("---")
     b1, _sp2, b2 = st.columns([2, 4, 2])
     if b1.button("← 이전 단계", use_container_width=True):
@@ -830,7 +805,7 @@ elif step == 5:
         st.warning("먼저 1단계에서 원본을 올려주세요.")
     else:
         st.write(f"**{data.get('deal_name','')}**  ·  {data.get('date_ko','')}  ·  "
-                 f"핵심요약 {st.session_state.get('pages', 1)}페이지")
+                 f"총 {st.session_state.get('total_pages', 5)}장")
 
         # ── 파일명 ────────────────────────────────────
         _dflt = f"[Rainfield]_{(data.get('deal_name') or '요약본')[:40]}_요약본"
@@ -843,17 +818,12 @@ elif step == 5:
 
         if st.button("생성", type="primary"):
             data["highlights"] = st.session_state.get("hl") or []
-            # 3단계에서 정한 칸 배치 → 빌더가 이 순서대로 쌓는다('(비움)' 은 제외)
-            _s = st.session_state.get("slots") or {}
-            _s2 = st.session_state.get("slots2") or {}
-            data["_slots"] = {
-                side: [v for v in _s.get(side, []) if v and v != "(비움)"]
-                for side in ("left", "right")
-            }
-            data["_slots2"] = {
-                side: [v for v in _s2.get(side, []) if v and v != "(비움)"]
-                for side in ("left", "right")
-            }
+            data["overview"] = [x for x in (st.session_state.get("ov_lines") or "").split("\n") if x.strip()]
+            # 3단계에서 정한 쪽별 칸 배치 → 빌더가 이 순서대로 쌓는다('(비움)' 은 제외)
+            _np = st.session_state.get("pages", 2)
+            data["_slots_pages"] = [
+                {side: [v for v in sp.get(side, []) if v and v != "(비움)"] for side in ("left", "right")}
+                for sp in (st.session_state.get("slots_pages") or [])[:_np]]
             # ── 금융구조도 ────────────────────────────
             # ★3단계에서 '미리보기 만들기' 를 안 눌렀거나 웹에서 그게 실패했으면
             #   구조도가 아예 안 만들어져 결과물에서 빠졌다.
@@ -882,8 +852,7 @@ elif step == 5:
             data["_diagram"] = {"pptx": st.session_state.get("diag_pptx"),
                                 "pptx_bytes": st.session_state.get("diag_bytes"),
                                 "png": st.session_state.get("diag_png")}
-            if ("금융구조도" in data["_slots"]["left"]
-                    or "금융구조도" in data["_slots"]["right"]) and not (
+            if any("금융구조도" in sp["left"] + sp["right"] for sp in data["_slots_pages"]) and not (
                     data["_diagram"]["pptx_bytes"] or data["_diagram"]["png"]):
                 st.warning("금융구조도를 넣도록 골랐지만 만들어진 구조도가 없습니다. "
                            "3단계에서 구조도를 하나 고르고 항목을 채워 주세요.")
@@ -901,7 +870,7 @@ elif step == 5:
                     _log = io.StringIO()
                     with contextlib.redirect_stdout(_log):
                         build_summary(data, tf.name, out,
-                                      pages=st.session_state.get("pages", 1))
+                                      pages=st.session_state.get("pages", 2))
                     st.session_state["build_log"] = [
                         ln for ln in _log.getvalue().splitlines()
                         if "[요약본]" in ln]

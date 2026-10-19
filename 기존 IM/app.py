@@ -295,7 +295,8 @@ def show_step1():
                            "toc_png_cache", "view_pdf_bytes", "highlight_cards", "hl_img_render",
                            "hl_done_render", "hl_view_page", "layout_preview_render",
                            "_hl_autofill_msg", "_toc_autofill_msg",
-                           "hl_es_pages_str", "hl_es_idx"):
+                           "hl_es_pages_str", "hl_es_idx",
+                           "ov_text", "ov_img_index", "ov_img_bytes", "ov_render"):
                     st.session_state.pop(_k, None)
                 _clear_toc_widget_state()
 
@@ -388,7 +389,7 @@ def _make_divider_miniature(w_px: int = 540, h_px: int = 374) -> bytes:
     _GREEN  = (146, 208, 80)
 
     try:
-        _fnt_path = os.path.join(os.path.dirname(__file__), "fonts", "PEOPLEFONTB.TTF")
+        _fnt_path = os.path.join(os.path.dirname(__file__), "fonts", "Pretendard-ExtraBold.otf")
         _base_fnt = _Font.truetype(_fnt_path, size=28)
     except Exception:
         _base_fnt = _Font.load_default()
@@ -439,7 +440,7 @@ def _make_toc_miniature(w_px: int = 540, h_px: int = 374) -> bytes:
     ry = int(oh / 2 * sy)
 
     try:
-        _fnt_path = os.path.join(os.path.dirname(__file__), "fonts", "PEOPLEFONTB.TTF")
+        _fnt_path = os.path.join(os.path.dirname(__file__), "fonts", "Pretendard-ExtraBold.otf")
         _base_fnt = _Font.truetype(_fnt_path, size=28)
     except Exception:
         _base_fnt = _Font.load_default()
@@ -466,7 +467,7 @@ def show_step3():
             st.rerun()
         return
 
-    st.markdown("## 5단계. 레이아웃 및 표지 미리 생성")
+    st.markdown("## 6단계. 레이아웃 및 표지 미리 생성")
     st.caption("날짜·표지 이미지를 지정하고 표지·목차·섹션을 미리 확인하세요. "
                "(목차 형식 4/5개는 3단계 '목차 구성'에서 정합니다)")
     st.markdown("")
@@ -755,12 +756,12 @@ def show_step3():
 
     with col_prev:
         if st.button("← 이전 단계", use_container_width=True):
-            st.session_state.current_step = 4   # → 배치 확인(4단계)
+            st.session_state.current_step = 5   # → 배치 확인(5단계)
             st.rerun()
 
     with col_next:
         if st.button("다음 단계 →", use_container_width=True, type="primary"):
-            st.session_state.current_step = 6   # → 전체 PPT 생성(6단계)
+            st.session_state.current_step = 7   # → 전체 PPT 생성(7단계)
             st.rerun()
 
 
@@ -904,6 +905,7 @@ def show_step4():
                     pages=final_pages,
                     cover_image_bytes=st.session_state.cover_image_bytes,
                     executive_summary_sections=_es_sections,   # 수동 하이라이트 카드
+                    overview=_overview_payload(),               # Overview 쪽(글 + 사진)
                     section_image_bytes_list=st.session_state.section_img_bytes_list,
                     toc_count=final_toc_count,
                     toc_map=final_toc_map,
@@ -960,7 +962,7 @@ def show_step4():
     # (D) 하단 네비게이션
     # ────────────────────────────────────────
     if st.button("← 이전 단계 (설정 변경)", use_container_width=False):
-        st.session_state.current_step = 5   # → 레이아웃/표지(5단계)
+        st.session_state.current_step = 6   # → 레이아웃/표지(6단계)
         st.rerun()
 
 
@@ -1226,7 +1228,7 @@ def _render_pages_grid(view_pdf, pages, cols=5):
 
 
 def show_step_toc():
-    st.markdown("## 3단계. 목차 구성")
+    st.markdown("## 4단계. 목차 구성")
     st.caption("왼쪽에서 원본 IM을 표지부터 넘겨보고, 오른쪽에서 목차 제목·소제목을 직접 만드세요. "
                "소제목마다 **원본 IM의 몇 페이지인지** 번호로 지정하면 됩니다. "
                "(IM마다 목차/소제목 형식이 제각각이라 자동추출은 부정확 → 페이지 번호로 매칭)")
@@ -1452,11 +1454,11 @@ def show_step_toc():
     nc1, _ns, nc2 = st.columns([2, 4, 2])
     with nc1:
         if st.button("← 이전 단계", use_container_width=True):
-            st.session_state.current_step = 2   # → 하이라이트(2단계)
+            st.session_state.current_step = 3   # → 하이라이트(3단계)
             st.rerun()
     with nc2:
         if st.button("다음 단계 →", use_container_width=True, type="primary"):
-            st.session_state.current_step = 4   # → 배치 확인(4단계)
+            st.session_state.current_step = 5   # → 배치 확인(5단계)
             st.rerun()
 
 
@@ -1502,7 +1504,7 @@ def _find_toc_pages(pages_text):
 #   4단계와 같은 위젯 키(tocpage_{gi}_{si})를 써서 수정이 서로 동기화된다.
 # ─────────────────────────────────────────────
 def show_step_arrange():
-    st.markdown("## 4단계. 배치 확인")
+    st.markdown("## 5단계. 배치 확인")
     st.caption("목차(대분류)에 넣은 원본 페이지를 목차 순서대로 이미지로 확인합니다. "
                "잘못됐거나 바꾸고 싶으면 각 목차의 페이지 칸에서 바로 고치세요 — "
                "고치면 아래 이미지가 다시 그려집니다. (다운로드 아님 · 화면 확인용)")
@@ -1511,7 +1513,7 @@ def show_step_arrange():
     if not toc:
         st.warning("먼저 3단계에서 목차를 구성해주세요.")
         if st.button("← 3단계로"):
-            st.session_state.current_step = 3   # → 목차 구성(3단계)
+            st.session_state.current_step = 4   # → 목차 구성(4단계)
             st.rerun()
         return
 
@@ -1573,11 +1575,139 @@ def show_step_arrange():
     nc1, _ns, nc2 = st.columns([2, 4, 2])
     with nc1:
         if st.button("← 이전 단계", use_container_width=True):
-            st.session_state.current_step = 3   # → 목차 구성(3단계)
+            st.session_state.current_step = 4   # → 목차 구성(4단계)
             st.rerun()
     with nc2:
         if st.button("다음 단계 →", use_container_width=True, type="primary"):
-            st.session_state.current_step = 5   # → 레이아웃/표지(5단계)
+            st.session_state.current_step = 6   # → 레이아웃/표지(6단계)
+            st.rerun()
+
+
+# ─────────────────────────────────────────────
+# [2단계: Overview 구성] — 표지 다음 쪽(글 + 원본 사진). 2026-10-19 새 레이아웃
+# ─────────────────────────────────────────────
+def _overview_payload():
+    """build_full_presentation 에 넘길 Overview 내용 {text, image}. 비어 있으면 None."""
+    txt = (st.session_state.get("ov_text") or "").strip()
+    img = st.session_state.get("ov_img_bytes")
+    if not txt and not img:
+        return None
+    return {"text": txt, "image": img}
+
+
+def _build_overview_ppt_bytes(text, image_bytes, business_name=""):
+    import io as _io
+    from modules.page_builders import (create_presentation_from_template, build_overview_slide,
+                                       finalize_presentation)
+    prs = create_presentation_from_template()
+    n = len(prs.slides)
+    build_overview_slide(prs, text, image_bytes, business_name)
+    finalize_presentation(prs, n)
+    buf = _io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def show_step_overview():
+    st.markdown("## 2단계. Overview 구성")
+    st.caption("표지 바로 다음 쪽 'Overview' 를 만드는 단계입니다. 위에는 사업 요약 글, 아래에는 원본 IM 의 사진 한 장이 들어갑니다.")
+    with st.expander("📖 사용법 (처음이면 눌러보세요)", expanded=False):
+        st.markdown(
+            "1. **글** — `🤖 자동 작성` 을 누르면 원본의 Executive Summary 를 읽어 3~4줄로 써 줍니다. 직접 고쳐도 됩니다.\n"
+            "   - 한 줄 = 한 문장(앞에 → 가 자동으로 붙습니다).\n"
+            "   - 강조할 부분은 `**두 별표**` 로 감싸면 **굵게 + 밑줄** 로 나옵니다. 예) `**총 8,500억원 조달**`\n"
+            "2. **사진** — 원본에서 뽑은 사진 중 하나를 고르세요. **사진은 자르지 않고 원본 비율 그대로** 넣습니다.\n"
+            "   레이아웃 사진 자리에 최대한 크게 들어가게 크기만 맞춥니다(예: 원본이 4:8 이면 1:2 그대로).\n"
+            "3. `🖼️ 완성본 미리보기` 로 확인한 뒤 다음 단계로 가세요. 글·사진을 둘 다 비우면 이 쪽은 빠집니다.")
+
+    pages_text = (st.session_state.get("extracted_data") or {}).get("pages_text", [])
+    st.session_state.setdefault("ov_text", "")
+    if st.button("🤖 자동 작성 (Executive Summary 읽기)", help="원본 Executive Summary 페이지를 읽어 Overview 글을 만듭니다."):
+        es = _es_only_text(pages_text) or "\n".join(pages_text[:4])
+        if not es.strip():
+            st.warning("원본에서 글을 못 찾았어요. 직접 써 주세요.")
+        else:
+            with st.spinner("원본을 읽어 Overview 글을 쓰는 중..."):
+                try:
+                    from modules.ai_slide_builders import generate_overview
+                    res = generate_overview(es)
+                except Exception as e:
+                    res = {"ok": False, "error": str(e)}
+            if res.get("ok"):
+                lines_ = (res.get("data") or {}).get("lines") or []
+                st.session_state["ov_text"] = "\n".join(str(x).strip() for x in lines_ if str(x).strip())
+                st.rerun()
+            else:
+                st.warning(f"자동 작성 실패: {res.get('error', '알 수 없음')} — 직접 써 주세요.")
+    st.text_area("Overview 글 (한 줄 = 한 문장, 강조는 **두 별표**)", key="ov_text", height=180,
+                 placeholder="예) 본건은 서초구 내곡동 헌인마을 도시개발사업 PF 의 **리파이낸싱 대출** 건임.")
+
+    st.markdown("#### 🖼️ 사진 고르기 (자르지 않고 원본 비율 그대로 들어갑니다)")
+    images = (st.session_state.get("extracted_data") or {}).get("images", [])
+    if not images:
+        st.info("원본에서 뽑은 사진이 없어요. 사진 없이 글만 들어갑니다.")
+    else:
+        pick = st.session_state.get("ov_img_index", -1)
+        cols = st.columns(4)
+        for i, im in enumerate(images[:16]):
+            with cols[i % 4]:
+                st.image(im["pil_image"], use_container_width=True)
+                lab = ("✅ " if pick == i else "") + f"#{i + 1} 쓰기 ({im['width']}×{im['height']})"
+                if st.button(lab, key=f"ov_pick_{i}", use_container_width=True):
+                    import io as _io
+                    buf = _io.BytesIO()
+                    im["pil_image"].convert("RGB").save(buf, format="PNG")
+                    st.session_state["ov_img_index"] = i
+                    st.session_state["ov_img_bytes"] = buf.getvalue()
+                    st.rerun()
+        if len(images) > 16:
+            with st.expander(f"나머지 {len(images) - 16}개 더 보기"):
+                cols2 = st.columns(4)
+                for j, im in enumerate(images[16:], start=16):
+                    with cols2[j % 4]:
+                        st.image(im["pil_image"], use_container_width=True)
+                        if st.button(("✅ " if pick == j else "") + f"#{j + 1} 쓰기", key=f"ov_pick_{j}",
+                                     use_container_width=True):
+                            import io as _io
+                            buf = _io.BytesIO()
+                            im["pil_image"].convert("RGB").save(buf, format="PNG")
+                            st.session_state["ov_img_index"] = j
+                            st.session_state["ov_img_bytes"] = buf.getvalue()
+                            st.rerun()
+        if st.button("사진 없이", key="ov_pick_none"):
+            st.session_state["ov_img_index"] = -1
+            st.session_state["ov_img_bytes"] = None
+            st.rerun()
+
+    st.markdown("---")
+    if st.checkbox("🖼️ 완성본 미리보기", key="ov_preview_on"):
+        if st.button("완성본 이미지 생성/갱신", key="ov_preview_gen"):
+            try:
+                ppt_b = _build_overview_ppt_bytes(st.session_state.get("ov_text") or "",
+                                                  st.session_state.get("ov_img_bytes"),
+                                                  st.session_state.get("business_name", ""))
+                from modules.preview import ppt_to_images
+                with st.spinner("슬라이드를 이미지로 바꾸는 중..."):
+                    imgs, err = ppt_to_images(ppt_b, max_pages=1)
+                st.session_state["ov_render"] = {"imgs": imgs, "err": err}
+            except Exception as e:
+                st.session_state["ov_render"] = {"imgs": [], "err": f"완성본 생성 실패: {e}"}
+        rend = st.session_state.get("ov_render")
+        if rend and rend.get("err"):
+            st.error(rend["err"])
+        elif rend and rend.get("imgs"):
+            _a, _b, _c = st.columns([1, 3, 1])
+            with _b:
+                st.image(rend["imgs"][0], use_container_width=True)
+
+    nc1, _n, nc2 = st.columns([2, 4, 2])
+    with nc1:
+        if st.button("← 이전 단계", use_container_width=True, key="ov_prev"):
+            st.session_state.current_step = 1
+            st.rerun()
+    with nc2:
+        if st.button("다음 단계 →", use_container_width=True, type="primary", key="ov_next"):
+            st.session_state.current_step = 3   # → 하이라이트(3단계)
             st.rerun()
 
 
@@ -1654,7 +1784,7 @@ def _clear_highlight_widget_state():
 
 
 def show_step_highlight():
-    st.markdown("## 2단계. 하이라이트 (Executive Summary) 구성")
+    st.markdown("## 3단계. 하이라이트 (Executive Summary) 구성")
     st.caption("제안서 표지 다음에 들어가는 '핵심 요약(Executive Summary)' 3줄 카드를 만드는 단계입니다.")
     with st.expander("📖 사용법 (처음이면 눌러보세요)", expanded=False):
         st.markdown(
@@ -1814,11 +1944,11 @@ def show_step_highlight():
     nc1, _n, nc2 = st.columns([2, 4, 2])
     with nc1:
         if st.button("← 이전 단계", use_container_width=True):
-            st.session_state.current_step = 1
+            st.session_state.current_step = 2
             st.rerun()
     with nc2:
         if st.button("다음 단계 →", use_container_width=True, type="primary"):
-            st.session_state.current_step = 3   # → 목차 구성(3단계)
+            st.session_state.current_step = 4   # → 목차 구성(4단계)
             st.rerun()
 
 
@@ -1864,7 +1994,7 @@ def show_step_highlight_preview():
     if not cards:
         st.warning("2단계에서 하이라이트 카드를 먼저 작성해주세요.")
         if st.button("← 2단계로"):
-            st.session_state.current_step = 2
+            st.session_state.current_step = 3
             st.rerun()
         return
 
@@ -1908,11 +2038,11 @@ def show_step_highlight_preview():
     with nc1:
         if st.button("← 이전 (수정하러 가기)", use_container_width=True):
             st.session_state.pop("hl_done_render", None)   # 수정하면 완성본은 다시 만들도록
-            st.session_state.current_step = 2
+            st.session_state.current_step = 3
             st.rerun()
     with nc2:
         if st.button("다음 단계 →", use_container_width=True, type="primary"):
-            st.session_state.current_step = 4
+            st.session_state.current_step = 5
             st.rerun()
 
 
@@ -1974,14 +2104,16 @@ def show_conversion_tab():
     if st.session_state.current_step == 1:
         show_step1()
     elif st.session_state.current_step == 2:
-        show_step_highlight()
+        show_step_overview()
     elif st.session_state.current_step == 3:
-        show_step_toc()
+        show_step_highlight()
     elif st.session_state.current_step == 4:
-        show_step_arrange()
+        show_step_toc()
     elif st.session_state.current_step == 5:
-        show_step3()
+        show_step_arrange()
     elif st.session_state.current_step == 6:
+        show_step3()
+    elif st.session_state.current_step == 7:
         show_step4()
     else:
         st.info(f"📌 {st.session_state.current_step}단계는 추후 구현 예정입니다.")

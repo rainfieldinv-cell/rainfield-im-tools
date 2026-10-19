@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""요약본 파이프라인 — 원본 PDF → 4~5장 요약본.
+"""요약본 파이프라인 — 원본 PDF → 5~6장 요약본.
   extract_summary(pdf_bytes) -> data(dict)
   build_summary(data, pdf_path, out_path, pages=1) -> out_path
 """
-import io, os, json, sys
+import io, os, json, sys, re
 import datetime as _dt
 from copy import deepcopy
 
@@ -77,6 +77,7 @@ SYS = """당신은 부동산 금융 IM(투자설명서)을 읽고 '요약본 제
 {
  "deal_name": "사업명(표지용)",
  "date_ko": "발행일 또는 제안 시점(예: 2026년 8월)",
+ "overview": ["사업 개요 핵심 문장(원문 그대로) 3~4줄 — 요약본 'Overview' 칸에 들어간다"],
  "highlights": [
    {"title":"12자내 짧은 제목", "subtitle":"20자내 한 줄 부제", "bullets":["근거 1(상세)","근거 2(상세)"]}
  ],
@@ -107,7 +108,7 @@ def extract_summary(pdf_bytes: bytes) -> dict:
     data = extract_from_pdf(pdf_bytes)
     full = "\n".join(data.get("pages_text", []))
     res = call_claude(SYS, f"[IM 원문]\n{full}", slide_num=801,
-                      pdf_context=full, prompt_version="summary_extract_v5")
+                      pdf_context=full, prompt_version="summary_extract_v6")
     if not res.get("ok"):
         raise RuntimeError(res.get("error") or "추출 실패")
     return res["data"]
@@ -420,7 +421,12 @@ def _stack(blocks, x_in, w_in, top_in, bottom_in, gap_in=0.16, label_gap_in=0.05
             if body.has_table:
                 _set_table_width(body, W)     # 열 너비까지 같이 맞춘다
                 _fit_table_rows(body)         # 글 양에 맞춰 행 높이 확보
+                if getattr(body, "name", "") == "블록:담보대출조건:본문":
+                    _loan_fix(body)           # 3번째 줄 칸 안에 Tr 표를 얹는다
                 h = _table_h(body)
+            elif body.shape_type == 17 and body.has_text_frame:
+                body.width = W                # 글 상자(Overview) — 글 양만큼 높이
+                h = _text_box_h(body, W)
             else:
                 # 그림·구조도는 폭만 바꾸면 찌그러진다 → 높이도 같은 비율로.
                 _ow, _oh = body.width or 0, body.height or 0
@@ -586,7 +592,7 @@ def highlights_from_pages(pdf_bytes, pages):
 
 def build_highlight_preview(data: dict, out_path: str) -> str:
     """하이라이트 슬라이드 1장만 만든 PPTX(미리보기용)."""
-    return build_summary(data, None, out_path, pages=1, _highlight_only=True)
+    return build_summary(data, None, out_path, pages=2, _highlight_only=True)
 
 
 # ── 하이라이트 제목 블록([체크아이콘]+[제목]) 가운데 정렬 ───────────────
@@ -640,83 +646,128 @@ def _center_title_group(grp, txbox, title: str, slide_w: int) -> bool:
     return True
 
 
-def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
+def _tbl_add_col(table):
+    """표 맨 오른쪽 앞(마지막 열 바로 앞)에 열 하나 — 마지막 열(합계) 서식을 복제."""
+    from pptx.oxml.ns import qn
+    tbl = table._tbl
+    grid = tbl.find(qn("a:tblGrid"))
+    cols = grid.findall(qn("a:gridCol"))
+    src = cols[-2] if len(cols) >= 2 else cols[-1]
+    new = deepcopy(src)
+    cols[-1].addprevious(new)
+    for tr in tbl.tr_lst:
+        tcs = tr.findall(qn("a:tc"))
+        ref = tcs[-2] if len(tcs) >= 2 else tcs[-1]
+        tcs[-1].addprevious(deepcopy(ref))
+
+
+def _tbl_del_col(table, idx):
+    from pptx.oxml.ns import qn
+    tbl = table._tbl
+    grid = tbl.find(qn("a:tblGrid"))
+    grid.remove(grid.findall(qn("a:gridCol"))[idx])
+    for tr in tbl.tr_lst:
+        tr.remove(tr.findall(qn("a:tc"))[idx])
+
+
+def _num(v):
+    try:
+        return float(re.sub(r"[^\d.\-]", "", str(v)))
+    except Exception:
+        return None
+
+
+def _set_font_light(tf):
+    """글 상자 글자를 얇은 회사 글꼴로(2026-10-19 사용자: 두꺼운 = Pretendard ExtraBold, 얇은 = Pretendard Light)."""
+    from pptx.oxml.ns import qn
+    for p in tf.paragraphs:
+        for r in p.runs:
+            rpr = r._r.get_or_add_rPr()
+            for tag in ("a:latin", "a:ea", "a:cs"):
+                e = rpr.find(qn(tag))
+                if e is None:
+                    e = rpr.makeelement(qn(tag), {})
+                    rpr.append(e)
+                e.set("typeface", "Pretendard Light")
+            rpr.attrib.pop("b", None)
+
+
+def _text_box_h(shape, w_emu):
+    """글 상자 높이 어림 — 단 폭에서 줄 수를 세고 글자 크기 × 1.5 줄 간격."""
+    pt = 9.0
+    for p in shape.text_frame.paragraphs:
+        for r in p.runs:
+            if r.font.size:
+                pt = r.font.size.pt
+                break
+        else:
+            continue
+        break
+    cpl = max(1.0, ((w_emu / 914400.0) - 0.45) * 72.0 / pt)
+    lines = 0
+    for ln in (shape.text_frame.text or "").split("\n"):
+        lines += max(1, int(-(-_units(ln) // cpl)))
+    return int(Inches(lines * pt * 1.62 / 72.0 + 0.22))
+
+
+def _loan_fix(body):
+    """'기초자산 담보대출 주요 조건' 표: 3번째 줄(대출금액 및 조건) 칸 안에 Tr 표를 얹고 그만큼 줄을 키운다."""
+    tr = next((sh for sh in body._parent if getattr(sh, "name", "") == "블록:담보대출조건:부속"), None)
+    if tr is None:
+        return
+    t = body.table
+    c0 = t.columns[0].width
+    c1 = sum(c.width for c in list(t.columns)[1:])
+    _set_table_width(tr, int(c1 - Inches(0.16)))
+    tr.left = body.left + c0 + Inches(0.08)
+    tr.top = body.top + t.rows[0].height + t.rows[1].height + Inches(0.06)
+    note = (t.cell(2, 1).text or "").strip()
+    note_h = Inches(0.2) * max(1, note.count("\n") + 1) if note else 0
+    t.rows[2].height = int(_table_h(tr) + Inches(0.12) + note_h)
+
+
+def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 2,
                   _highlight_only: bool = False) -> str:
+    """요약본 PPT. 2026-10-19 새 레이아웃: [표지][Deal Highlight][내용 1][내용 2]([내용 3])[End].
+    pages = 내용 쪽 수(2 = 총 5장, 3 = 총 6장)."""
     prs = Presentation(_layout_path())
 
     # 슬라이드 1 : 표지
     s1 = prs.slides[0]
     name = (data.get('deal_name') or '').strip()
-    # 딜명과 '사모사채 제안서(요약본)' 은 줄을 나눈다(한 줄로 붙이면 아무 데서나 꺾인다).
     _replace_contains(s1, "사업명(요약본)", name + chr(10) + "사모사채 제안서(요약본)")
-    # ★날짜는 원본에서 뽑지 않고 **만드는 날**을 쓴다. 원본 날짜를 읽으면 자꾸 틀렸다.
-    #   숫자로 적는다(2026. 09). 영문 월은 사용자가 원하지 않는다.
     _now = _dt.datetime.now()
     _replace_contains(s1, "몇월", f"{_now.year}. {_now.month:02d}")
     _fix_cover_overlap(s1)
 
-    # 슬라이드 2 : 하이라이트
+    # 슬라이드 2 : Deal Highlight — 카드 3개 = [<제목>][대괄호][본문] 그룹
     s2 = prs.slides[1]
     hl = data.get('highlights') or []
-    title_boxes = []
-    for sh in s2.shapes:
-        if sh.shape_type == 6:
-            for ch in sh.shapes:
-                if ch.has_text_frame and ch.text_frame.text.strip() == "제목":
-                    title_boxes.append((sh.top, sh, ch))   # (정렬키, 그룹, 글상자)
-    title_boxes = [(g, c) for _, g, c in sorted(title_boxes, key=lambda x: x[0])]
-    sub_boxes = sorted([sh for sh in s2.shapes if sh.has_text_frame and sh.text_frame.text.strip() == "부제목"],
-                       key=lambda sh: sh.top)
-    bull_boxes = sorted([sh for sh in s2.shapes if sh.has_text_frame and len(sh.text_frame.text.strip()) > 20],
-                        key=lambda sh: sh.top)
-    # 슬라이드 폭(요약본 레이아웃은 10.83in) 기준으로 꺾쇠 안쪽에 맞춘다
-    _SW = prs.slide_width
-    # 꺾쇠는 1.45~9.39in 이지만 양끝의 화살촉이 안쪽으로 파고든다.
-    # 7.40in 로 두면 긴 줄이 오른쪽 화살촉에 닿았다 → 기존 IM 변환기와 같은 여백으로.
-    _BODY_L, _BODY_W = Inches(1.80), Inches(7.00)
-
-    for i in range(min(3, len(hl))):
-        if i < len(title_boxes):
-            grp, tb = title_boxes[i]
-            _title = (hl[i].get('title') or '').strip()
-            _replace_text_keep_runs(tb.text_frame, _title)
-            # 제목은 아이콘 오른쪽에서 시작(왼쪽정렬)하고, 아이콘까지 묶은 블록을
-            # _center_title_group 이 슬라이드 정중앙으로 옮긴다.
-            tb.text_frame.word_wrap = False
-            for p in tb.text_frame.paragraphs:
-                p.alignment = PP_ALIGN.LEFT
-            _center_title_group(grp, tb, _title, _SW)
-        if i < len(sub_boxes):
-            sb = sub_boxes[i]
-            _replace_text_keep_runs(sb.text_frame, hl[i].get('subtitle', ''))
-            # 부제목은 가운데정렬이라 폭만 넉넉히 주면 알아서 가운데에 선다.
-            # (틀의 2.58" 를 그대로 두면 긴 부제목이 두 줄로 접힌다.)
-            sb.left, sb.width = _BODY_L, _BODY_W
-            sb.text_frame.word_wrap = False
-            for p in sb.text_frame.paragraphs:
-                p.alignment = PP_ALIGN.CENTER
-        if i < len(bull_boxes):
-            bb = bull_boxes[i]
-            # 틀이 이미 '→' 를 글머리기호로 찍는다. 본문에도 '→' 가 들어오면
-            # '→ →' 로 두 번 찍히므로 앞머리의 기호를 떼어낸다.
-            _bul = []
-            for _b in (hl[i].get('bullets') or []):
-                _b = str(_b).strip()
-                while _b[:1] in ("→", "·", "-", "•", "▶", "ㆍ"):
-                    _b = _b[1:].strip()
-                if _b:
-                    _bul.append(_b)
-            _replace_text_keep_runs(bb.text_frame, "\n".join(_bul))
-            # ★근거: word_wrap 이 꺼져 있어 한 줄이 꺾쇠 밖으로 뚫고 나갔다 → 켜서 안에서 접히게.
-            bb.left, bb.width = _BODY_L, _BODY_W
-            bb.text_frame.word_wrap = True
-            try:
-                bb.text_frame.auto_size = MSO_AUTO_SIZE.NONE
-            except Exception:
-                pass
+    groups = sorted([sh for sh in s2.shapes if sh.shape_type == 6
+                     and not any(c.shape_type == 13 for c in sh.shapes)], key=lambda g: g.top)
+    for i, g in enumerate(groups[:3]):
+        tbs = [c for c in g.shapes if c.shape_type == 17 and c.has_text_frame]
+        tt = next((c for c in tbs if c.text_frame.text.strip().startswith("<")), None)
+        body = max([c for c in tbs if c is not tt], key=lambda c: c.width or 0, default=None)
+        card = hl[i] if i < len(hl) else {}
+        title = (card.get('title') or '').strip().strip("<>").strip()
+        sub = (card.get('subtitle') or '').strip() if card.get('use_sub', True) else ''
+        bul = []
+        for _b in (card.get('bullets') or []):
+            _b = str(_b).strip()
+            while _b[:1] in ("→", "·", "-", "•", "▶", "ㆍ"):
+                _b = _b[1:].strip()
+            if _b:
+                bul.append(_b)
+        if tt is not None:
+            _replace_text_keep_runs(tt.text_frame, f"<{title}>" if title else "")
+            tt.text_frame.word_wrap = False
+        if body is not None:
+            _replace_text_keep_runs(body.text_frame, "\n".join(([sub] if sub else []) + bul))
+            body.text_frame.word_wrap = True
+            _set_font_light(body.text_frame)
 
     if _highlight_only:
-        # 미리보기: 하이라이트 슬라이드만 남기고 나머지 삭제
         _ids = list(prs.slides._sldIdLst)
         for _i, _sid in enumerate(_ids):
             if _i != 1:
@@ -724,227 +775,249 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         prs.save(out_path)
         return out_path
 
-    # 슬라이드 3 : 핵심 요약
-    s3 = prs.slides[2]
-    # ★shape.table 은 접근할 때마다 새 객체를 만들어 'is' 비교가 안 된다
-    #   → 나중에 재배치할 수 있도록 '도형' 참조도 같은 순서로 잡아둔다.
-    tshapes = [sh for sh in s3.shapes if sh.has_table]
-    tables = [sh.table for sh in tshapes]
-    T_LOAN, T_TR, T_FIN, T_CORP, T_BOND, T_SCHED = tables
-    S_LOAN, S_TR, S_FIN, S_CORP, S_BOND, S_SCHED = tshapes
+    # 내용 쪽 : 틀의 3·4번 슬라이드를 '부품 상자' 로 쓴다 → 3번(s3)에 부품을 다 모으고 4번은 뺀다
+    s3, s4 = prs.slides[2], prs.slides[3]
+    E = 914400
+
+    def _tables(slide, nrows=None, ncols=None):
+        return [sh for sh in slide.shapes if sh.has_table
+                and (nrows is None or len(sh.table.rows) == nrows)
+                and (ncols is None or len(sh.table.columns) == ncols)]
+
+    def _name(sh, nm):
+        if sh is not None:
+            sh.name = nm
+        return sh
+
+    # 4번에서 '사업개요'(라벨 + 2열 표)·'사업일정'(라벨 + 3열 표)을 3번으로 옮겨 온다
+    for lbl_txt, pick in (("사업개요", lambda: next(iter(_tables(s4, ncols=2)), None)),
+                          ("사업일정", lambda: next(iter(_tables(s4, ncols=3)), None))):
+        lb, tb = _find_label(s4, lbl_txt), pick()
+        for sh, kind in ((lb, "라벨"), (tb, "본문")):
+            if sh is not None:
+                el = deepcopy(sh._element)
+                s3.shapes._spTree.append(el)
+                s3.shapes[-1].name = f"블록:{lbl_txt}:{kind}"
+
+    # 3번의 부품 이름표
+    _name(_find_label(s3, "Overview"), "블록:Overview:라벨")
+    ov_box = max([sh for sh in s3.shapes if sh.shape_type == 17 and sh.has_text_frame
+                  and len(sh.text_frame.text) > 40], key=lambda sh: len(sh.text_frame.text), default=None)
+    _name(ov_box, "블록:Overview:본문")
+    _name(_find_label(s3, "사모사채 개요"), "블록:사모사채개요:라벨")
+    T_BOND = _name(next(iter(_tables(s3, nrows=9, ncols=2)), None), "블록:사모사채개요:본문")
+    _name(_find_label(s3, "담보대출"), "블록:담보대출조건:라벨")
+    T_LOAN = _name(next(iter(_tables(s3, nrows=5, ncols=2)), None), "블록:담보대출조건:본문")
+    T_TR = _name(next(iter(_tables(s3, nrows=4)), None), "블록:담보대출조건:부속")
+    # 다른 딜 예시(담보토지 매입 현황 글·표·사진, 구조도 예시 그림)는 지운다
+    for sh in list(s3.shapes):
+        nm = sh.name or ""
+        if nm.startswith("블록:"):
+            continue
+        txt = sh.text_frame.text if sh.has_text_frame else ""
+        if ("담보토지" in txt) or (sh.has_table) or (sh.shape_type == 13 and (sh.width or 0) > Inches(1.8)):
+            sh._element.getparent().remove(sh._element)
+
     loan = data.get('담보대출조건') or {}
     bong = next((t for t in (loan.get('tranches') or []) if t.get('is_bongeon')), {})
-
-    # 사모사채 개요(고정+파생)
     기간 = (loan.get('대출기간') or '').strip()
-    for r, v in {3: f"{name} 담보대출채권", 4: bong.get('대출금액'),
-                 5: f"{data.get('date_ko','')} (예정)",
-                 6: f"발행일로부터 {기간 or '약 3개월'} (대출 만기 연동)",
-                 7: f"채권 금리 : 연 {bong.get('금리','')} (고정, 세전)"}.items():
-        if v and r < len(T_BOND.rows):
-            _set(T_BOND, r, 1, v)
 
-    # 담보대출
-    _set(T_LOAN, 0, 1, loan.get('금융구조'))
-    _set(T_LOAN, 1, 1, loan.get('차주'))
-    if len(T_LOAN.rows) > 2: _set(T_LOAN, 2, 1, loan.get('LTV기준_각주'))
-    if len(T_LOAN.rows) > 3: _lines(T_LOAN, 3, 1, loan.get('주요채권보전') or [])
-    if len(T_LOAN.rows) > 4: _set(T_LOAN, 4, 1, loan.get('대출기간'))
+    # Overview 글
+    if ov_box is not None:
+        _ov = data.get("overview") or []
+        if isinstance(_ov, str):
+            _ov = [x for x in _ov.split("\n")]
+        _ov = [str(x).replace("**", "").strip().lstrip("→·-•▶ㆍ ").strip() for x in _ov if str(x).strip()]
+        _replace_text_keep_runs(ov_box.text_frame, "\n".join(_ov))
+        ov_box.text_frame.word_wrap = True
+        _set_font_light(ov_box.text_frame)
 
-    # Tr
-    trs = loan.get('tranches') or []
-    ncol = len(T_TR.columns)
-    _set(T_TR, 0, 0, "구분")
-    for c in range(1, ncol):
-        if c-1 < len(trs):
-            _set(T_TR, 0, c, trs[c-1].get('구분', '') + (" (본건)" if trs[c-1].get('is_bongeon') else ""))
-    if len(T_TR.rows) >= 2:
-        _set(T_TR, 1, 0, "대출금액")
-        for c in range(1, ncol):
-            if c-1 < len(trs): _set(T_TR, 1, c, trs[c-1].get('대출금액'))
-    if len(T_TR.rows) >= 3:
-        _set(T_TR, 2, 0, "LTV / 금리")
-        for c in range(1, ncol):
-            if c-1 < len(trs):
-                v = trs[c-1]; _set(T_TR, 2, c, f"{v.get('LTV') or '-'} / {v.get('금리') or '-'}")
+    # 사모사채 개요(고정 + 파생) — 구분열은 그대로, 값열만
+    if T_BOND is not None:
+        tb = T_BOND.table
+        bo = data.get("사모사채개요") or {}
+        vals = {3: bo.get("기초자산") or f"{name} 담보대출채권", 4: bo.get("발행금액") or bong.get('대출금액'),
+                5: bo.get("발행일") or f"{data.get('date_ko', '')} (예정)",
+                6: bo.get("만기일") or f"발행일로부터 {기간 or '약 3개월'} (대출 만기 연동)",
+                7: bo.get("금융조건") or (f"채권 금리 : 연 {bong.get('금리', '')} (고정, 세전)" if bong.get('금리') else None)}
+        for r, v in vals.items():
+            if v and r < len(tb.rows):
+                _set(tb, r, 1, v)
 
-    # 재무
-    fin = data.get('재무제표') or {}
-    if fin:
-        yrs = fin.get('연도') or []; rows = fin.get('행') or []
-        _set(T_FIN, 0, 0, f"구분\n(단위 : {fin.get('단위','백만원')})")
-        for c in range(1, len(T_FIN.columns)):
-            _set(T_FIN, 0, c, yrs[c-1] if c-1 < len(yrs) else "")
-        need = len(rows) + 1; cur = len(T_FIN.rows)
-        if need > cur: _add_rows(T_FIN, need-cur)
-        elif need < cur: _del_rows(T_FIN, cur-need)
-        for i, row in enumerate(rows, start=1):
-            _set(T_FIN, i, 0, row.get('항목'))
-            for c in range(1, len(T_FIN.columns)):
-                vals = row.get('값') or []
-                _set(T_FIN, i, c, vals[c-1] if c-1 < len(vals) else "")
+    # 기초자산 담보대출 주요 조건 + Tr 표
+    if T_LOAN is not None:
+        tl = T_LOAN.table
+        _set(tl, 0, 1, loan.get('금융구조'))
+        _set(tl, 1, 1, loan.get('차주'))
+        _set(tl, 2, 1, (f"※ {loan.get('LTV기준_각주')}" if loan.get('LTV기준_각주') else ""))
+        try:
+            tl.cell(2, 1).vertical_anchor = MSO_ANCHOR.BOTTOM
+        except Exception:
+            pass
+        _lines(tl, 3, 1, loan.get('주요채권보전') or [])
+        _lines(tl, 4, 1, loan.get('주요인출선행조건') or ([f"대출기간 : {기간}"] if 기간 else []))
+    if T_TR is not None:
+        tt = T_TR.table
+        trs = loan.get('tranches') or []
+        # ★틀의 Tr.B 열(본건)은 빨간 테두리 — 열 수를 바꾸기 전에 칸 서식(보통/본건)을 떠 둔다
+        from pptx.oxml.ns import qn as _qn
+        _tcpr = lambda r, c: deepcopy(tt.cell(r, c)._tc.find(_qn("a:tcPr")))
+        _plain = [_tcpr(r, 1) for r in range(len(tt.rows))]
+        _red = [_tcpr(r, min(2, len(tt.columns) - 2)) for r in range(len(tt.rows))]
+        want = max(1, len(trs)) + 2                         # 구분 + Tr들 + 합계
+        while len(tt.columns) < want:
+            _tbl_add_col(tt)
+        while len(tt.columns) > want:
+            _tbl_del_col(tt, len(tt.columns) - 2)
+        nc = len(tt.columns)
+        _set(tt, 0, 0, "구분")
+        _set(tt, 1, 0, "대출금액(억원)")
+        _set(tt, 2, 0, "대출기간(월)")
+        _set(tt, 3, 0, "LTV")
+        tot = 0.0
+        ok = bool(trs)
+        for c in range(1, nc - 1):
+            v = trs[c - 1] if c - 1 < len(trs) else {}
+            _g = (v.get('구분') or '')
+            _set(tt, 0, c, _g + (" (본건)" if v.get('is_bongeon') and "본건" not in _g else ""))
+            _set(tt, 1, c, v.get('대출금액') or "")
+            _set(tt, 2, c, v.get('대출기간') or 기간 or "")
+            _set(tt, 3, c, v.get('LTV') or "-")
+            n_ = _num(v.get('대출금액'))
+            if n_ is None:
+                ok = False
+            else:
+                tot += n_
+        for c in range(1, nc - 1):                          # 본건 열만 빨간 테두리
+            v = trs[c - 1] if c - 1 < len(trs) else {}
+            for r in range(len(tt.rows)):
+                tc = tt.cell(r, c)._tc
+                old = tc.find(_qn("a:tcPr"))
+                src = (_red if v.get('is_bongeon') else _plain)[r]
+                if src is not None:
+                    if old is not None:
+                        tc.remove(old)
+                    tc.append(deepcopy(src))
+        _set(tt, 0, nc - 1, "합계")
+        _set(tt, 1, nc - 1, (f"{tot:,.0f}" if ok else "-"))
+        _set(tt, 2, nc - 1, "-")
+        _set(tt, 3, nc - 1, "")
 
-    # 법인개요
-    corp = data.get('법인개요') or {}
-    if corp:
-        pairs = [("회사명", corp.get('회사명'), "사업자번호", corp.get('사업자번호')),
-                 ("설립일", corp.get('설립일'), "대표자", corp.get('대표자')),
-                 ("자본금", corp.get('자본금'), "주요사업", corp.get('주요사업')),
-                 ("주요주주", corp.get('주요주주'), "", "")]
-        need = len(pairs); cur = len(T_CORP.rows)
-        if need < cur: _del_rows(T_CORP, cur-need)
-        elif need > cur: _add_rows(T_CORP, need-cur)
-        for i, (a, b, c, d) in enumerate(pairs):
-            _set(T_CORP, i, 0, a); _set(T_CORP, i, 1, b)
-            if len(T_CORP.columns) > 2:
-                _set(T_CORP, i, 2, c); _set(T_CORP, i, 3, d)
+    # 사업개요(2열 표) / 사업일정(3열 표)
+    lbl_ov2 = next((sh for sh in s3.shapes if sh.name == "블록:사업개요:라벨"), None)
+    T_BIZ = next((sh for sh in s3.shapes if sh.name == "블록:사업개요:본문"), None)
+    if T_BIZ is not None:
+        biz = data.get("사업개요") or {}
+        pairs = [(k, v) for k, v in (biz.items() if isinstance(biz, dict) else []) if v]
+        t = T_BIZ.table
+        need, cur = max(1, len(pairs)), len(t.rows)
+        if need > cur:
+            _add_rows(t, need - cur)
+        elif need < cur:
+            _del_rows(t, cur - need)
+        for i, (a, b) in enumerate(pairs):
+            _set(t, i, 0, a)
+            _set(t, i, 1, b)
+    T_SCHED = next((sh for sh in s3.shapes if sh.name == "블록:사업일정:본문"), None)
+    if T_SCHED is not None:
+        ts = T_SCHED.table
+        sched = data.get('사업일정') or {}
+        done = sched.get('완료') or []
+        plan = sched.get('예정') or []
+        allrows = [("완료", d) for d in done] + [("예정", p) for p in plan]
+        need, cur = max(1, len(allrows)), len(ts.rows)
+        if need > cur:
+            _add_rows(ts, need - cur)
+        elif need < cur:
+            _del_rows(ts, cur - need)
+        for i, (grp, it) in enumerate(allrows):
+            _set(ts, i, 0, grp if (i == 0 or i == len(done)) else "")
+            _set(ts, i, 1, it.get('시기'))
+            _set(ts, i, 2, it.get('내용'))
 
-    # 사업일정(핵심만)
-    sched = data.get('사업일정') or {}
-    done = sched.get('완료') or []; plan = sched.get('예정') or []
-    allrows = [("완료", d) for d in done] + [("예정", p) for p in plan]
-    need = len(allrows); cur = len(T_SCHED.rows)
-    if need > cur: _add_rows(T_SCHED, need-cur)
-    elif need < cur: _del_rows(T_SCHED, cur-need)
-    for i, (grp, it) in enumerate(allrows):
-        _set(T_SCHED, i, 0, grp if (i == 0 or i == len(done)) else "")
-        _set(T_SCHED, i, 1, it.get('시기')); _set(T_SCHED, i, 2, it.get('내용'))
-
-    # ── 라벨을 이 딜의 회사명으로 교체 ─────────────────
-    #   틀에는 참고자료(신영증권 건)의 '(주)신영' 이 박혀 있어, 그대로 두면
-    #   남의 회사 이름이 우리 제안서에 나간다. 반드시 실제 회사명으로 바꾼다.
-    _corp_nm = (corp.get('회사명') or data.get('연대보증사') or '').strip()
-    lbl_corp = _find_label(s3, "법인개요")
-    lbl_fin = _find_label(s3, "재무제표")
-    if lbl_corp is not None:
-        _replace_text_keep_runs(lbl_corp.text_frame,
-                                f"{_corp_nm} 법인개요" if _corp_nm else "법인개요")
-    if lbl_fin is not None:
-        _replace_text_keep_runs(lbl_fin.text_frame,
-                                f"{_corp_nm} 주요 재무현황" if _corp_nm else "주요 재무현황")
-    lbl_loan = _find_label(s3, "담보대출")
-    lbl_sched = _find_label(s3, "사업일정")
-    lbl_diag = _find_label(s3, "금융구조도")
-
-    # ── 참고자료 이미지 제거 + 이 딜의 조감도 삽입 ──────
-    diag_pic = None
-    for sh in list(s3.shapes):
-        if sh.shape_type == 13 and sh.width and sh.width > int(Inches(1.8)):
-            if diag_pic is None and (sh.top or 0) > int(Inches(4.5)):
-                diag_pic = sh          # 좌하단 = 금융구조도 자리(살려서 재배치)
-                continue
-            sh._element.getparent().remove(sh._element)
-        elif sh.shape_type == 6:
-            # ★참고 레이아웃의 '샘플 조감도'는 GROUP 안에 그림 2장으로 들어있다.
-            #   PICTURE 조건만 보면 GROUP 안은 못 잡아 그대로 남고, 슬라이드를 복제하면
-            #   그 그림들이 '그림을 표시할 수 없습니다'로 깨져 나온다. → 그림 든 GROUP 은 제거.
-            try:
-                has_pic = any(c.shape_type == 13 for c in sh.shapes)
-            except Exception:
-                has_pic = False
-            if has_pic or (sh.top and sh.top > int(Inches(5.5))):
-                sh._element.getparent().remove(sh._element)
-    if diag_pic is not None:           # 아직 작도 전 → 자리만 두면 지저분하므로 제거
-        diag_pic._element.getparent().remove(diag_pic._element)
-        if lbl_diag is not None:
-            lbl_diag._element.getparent().remove(lbl_diag._element)
-            lbl_diag = None
-
-    top_pic = None
+    # 조감도(원본 사진)
     try:
         import fitz
         doc = fitz.open(pdf_path)
-        # ★로고·워터마크(여러 페이지 반복) 제외 — 안 그러면 발행사 로고가 조감도 자리에 박힌다
         skip = repeated_xrefs(doc)
         imgs = []
         for pi in range(doc.page_count):
             imgs += extract_page_images(doc, pi, skip_xrefs=skip)
         imgs = [im for im in imgs if im.get('data')]
-        # ★조감도 고르기: ①사진(평균밝기<200 — 공문·도면은 흰 바탕이라 밝다)
-        #   ②가로로 넓은 것 ③큰 것.  전엔 '가장 큰 것'만 봐서 삼성증권 공문이 뽑혔다.
         for im in imgs:
             ar = im['width'] / max(1, im['height'])
             im['_score'] = (1 if mean_brightness(im['data']) < 200 else 0,
-                            1 if 1.2 <= ar <= 2.6 else 0,
-                            im['width'] * im['height'])
+                            1 if 1.2 <= ar <= 2.6 else 0, im['width'] * im['height'])
         imgs.sort(key=lambda im: im['_score'], reverse=True)
         if imgs:
-            top_pic = s3.shapes.add_picture(
-                io.BytesIO(imgs[0]['data']), Inches(5.26), Inches(0.39),
-                width=Inches(5.32), height=Inches(1.80))
+            _p = s3.shapes.add_picture(io.BytesIO(imgs[0]['data']), Inches(0.25), Inches(0.39),
+                                       width=Inches(4.88))
+            _p.name = "블록:조감도:본문"
         doc.close()
     except Exception as _ie:
         print(f"[요약본] 조감도 삽입 실패: {_ie}")
 
-    # ── ★사용자가 3단계에서 정한 '칸 배치'대로 쌓는다 ──────
-    #   data["_slots"] = {"left": [항목,...], "right": [항목,...]}  (위→아래 순서)
-    #   없으면 기본 배치를 쓴다. 고른 것만 남기고 나머지 도형은 지운다.
-    #   틀은 위치가 고정이라 표 행 수가 딜마다 달라지면 아래를 덮으므로,
-    #   내용을 채운 뒤 실제 높이로 다시 쌓는다.
-    DEFAULT1 = {"left":  ["사모사채개요", "담보대출조건", "금융구조도"],
-                "right": ["조감도", "사업일정", "법인개요", "재무제표"]}
-    DEFAULT2 = {"left":  ["법인개요", "재무제표"], "right": []}
-    slots = dict(data.get("_slots") or DEFAULT1)
-    slots2 = dict(data.get("_slots2") or (DEFAULT2 if pages >= 2 else {}))
+    # 쪽마다 고른 칸 배치
+    DEFAULTS = [
+        {"left": ["Overview", "사모사채개요", "금융구조도"], "right": ["담보대출조건"]},
+        {"left": ["사업개요", "조감도"], "right": ["사업일정"]},
+        {"left": ["법인개요"], "right": ["재무제표"]},
+    ]
+    pages = max(1, int(pages or 2))
+    sp = list(data.get("_slots_pages") or [])
+    slots_pages = [dict(sp[k]) if k < len(sp) and sp[k] else DEFAULTS[min(k, len(DEFAULTS) - 1)]
+                   for k in range(pages)]
+    _wanted = {k for _s in slots_pages for _side in ("left", "right") for k in (_s.get(_side) or [])}
 
-    # ── ★고정 7항목 말고, 원본에서 찾은 다른 내용도 칸에 넣을 수 있게 ──
-    #   [라벨 + 2열 표] 한 벌씩 미리 만들어 둔다. 반드시 슬라이드 복제 **전**에
-    #   만들어야 2페이지짜리에서도 둘째 장이 같은 블록을 갖는다.
-    #   고르지 않은 블록은 아래 _arrange 가 지운다.
-    _lbl_proto = _find_label(s3, "사업일정")
-    _tbl_proto = next((sh for sh in s3.shapes
-                       if sh.has_table and len(sh.table.columns) == 2), None)
-    _extra_order = []
-    if _tbl_proto is not None:
-        _wanted = {k for _s in (slots, slots2)
-                   for _side in ("left", "right") for k in (_s.get(_side) or [])}
-        for _title, _pairs in extra_blocks_of(data):
-            if _wanted and _title not in _wanted:
-                continue          # 안 고른 항목은 애초에 만들지 않는다
-            _build_extra_block(s3, _tbl_proto, _lbl_proto, _title, _pairs)
-            _extra_order.append(_title)
+    # 그 밖의 내용(법인개요·재무제표·중요항목 등)은 [라벨 + 2열 표] 한 벌씩
+    _lbl_proto = next((sh for sh in s3.shapes if sh.name == "블록:사업일정:라벨"), None)
+    _tbl_proto = T_BIZ
+    extras = list(extra_blocks_of(data))
+    corp = data.get('법인개요') or {}
+    if corp:
+        _cn = (corp.get('회사명') or '').strip()
+        extras.append(("법인개요", [(k, corp.get(k)) for k in
+                                    ("회사명", "설립일", "사업자번호", "대표자", "자본금", "주요사업", "주요주주")
+                                    if corp.get(k)]))
+    fin = data.get('재무제표') or {}
+    if fin and fin.get('행'):
+        yrs = fin.get('연도') or []
+        rows = [(f"구분(단위 : {fin.get('단위', '백만원')})", " / ".join(str(y) for y in yrs))]
+        for row in fin.get('행') or []:
+            rows.append((row.get('항목') or "", " / ".join(str(x) for x in (row.get('값') or []))))
+        extras.append(("재무제표", rows))
+    for _title, _pairs in extras:
+        if _title == "사업개요" or (_wanted and _title not in _wanted) or _tbl_proto is None:
+            continue
+        lb, tb = _build_extra_block(s3, _tbl_proto, _lbl_proto, _title, _pairs)
+        if lb is not None:
+            lb.name = f"블록:{_title}:라벨"
+        tb.name = f"블록:{_title}:본문"
 
-    _FIXED_N = 6      # 틀에 원래 있는 표 6개(L, TR, F, C, B, SC)
-
-    # ── ★원본 IM 의 표를 그대로 그린다 ─────────────────
-    #   글로 옮기면 요약본이 아니다. 원문에 표로 돼 있으면 표를 넣는다.
-    #   슬라이드 복제 전에 만들어야 2페이지에서도 같은 표를 쓸 수 있다.
+    # 원본 IM 의 표를 그대로
     _orig = data.get("_orig_tables") or {}
-    _orig_order = []
     if _orig:
-        _want = {k for _s in (slots, slots2)
-                 for _side in ("left", "right") for k in (_s.get(_side) or [])}
         try:
             import ppt_tables as _pt
-            for _name, _t in _orig.items():
-                if _want and _name not in _want:
+            for _nm, _t in _orig.items():
+                if _wanted and _nm not in _wanted:
                     continue
-                _lb = None
                 if _lbl_proto is not None:
                     _lb = _clone_at_end(s3, _lbl_proto)
-                    _replace_text_keep_runs(_lb.text_frame, _t.get("title") or _name)
-                    # ★이름표를 단다. 글자로 찾으면 틀에 원래 있던 '사업일정' 라벨이
-                    #   먼저 잡혀서, 새로 만든 라벨이 제 표를 못 찾고 슬라이드 한복판에
-                    #   그대로 남아 오른쪽 표를 덮었다.
-                    _lb.name = f"원본표라벨{len(_orig_order)}"
-                _pt.add_table(s3, _t, Inches(0.25), Inches(0.39), Inches(4.90))
-                _orig_order.append(_name)
+                    _replace_text_keep_runs(_lb.text_frame, _t.get("title") or _nm)
+                    _lb.name = f"블록:{_nm}:라벨"
+                _sh = _pt.add_table(s3, _t, Inches(0.25), Inches(0.39), Inches(4.90))
+                if _sh is None:
+                    _sh = next((sh for sh in reversed(list(s3.shapes)) if sh.has_table), None)
+                if _sh is not None:
+                    _sh.name = f"블록:{_nm}:본문"
         except Exception as _oe:
             print(f"[요약본] 원본 표 그리기 실패: {_oe}")
 
-    # ── ★3단계에서 만든 금융구조도 넣기 ───────────────
-    #   PPT 로 만들었으면 도형째 옮긴다(웹 서버엔 파워포인트가 없어 그림으로 못 바꾼다).
-    #   이미지로 받았으면 그림으로 넣는다.
-    #   PPT 를 도형째 옮기면 표가 안 줄어들어 겹치는 문제가 있었다.
-    #   사용자 지시대로 **그림으로 바꿔서** 넣는다(수정은 못 해도 모양이 정확하다).
-    #   그림에는 검정 얇은 테두리를 두른다.
+    # 금융구조도(3단계에서 만든 것) — 그림으로
     _diag = data.get("_diagram") or {}
-    _diag_shape = None
     _diag_png = _diag.get("png")
-    # ★경로가 사라졌어도(서버 재시작·임시폴더 청소) 내용이 있으면 다시 만들어 쓴다.
-    #   구조도를 골랐는데 결과물에 아무것도 안 들어가던 원인.
-    if _diag.get("pptx_bytes") and not (
-            _diag.get("pptx") and os.path.exists(_diag["pptx"])):
+    if _diag.get("pptx_bytes") and not (_diag.get("pptx") and os.path.exists(_diag["pptx"])):
         try:
             import tempfile as _tf
             _tmp = _tf.NamedTemporaryFile(suffix=".pptx", delete=False)
@@ -957,84 +1030,40 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
         try:
             from engine_bits import pptx_slide_png as _p2p
             import diagram as _dgm
-            # ★로고·제목·액자를 지운 사본으로 사진을 찍는다.
-            #   네모로 자르는 것만으론 못 뺀다(긴 화살표가 로고보다 위에서 시작).
-            _clean_pptx = _dgm.strip_chrome(_diag["pptx"])
-            _diag_png, _err = _p2p(_clean_pptx, 1)
+            _clean = _dgm.strip_chrome(_diag["pptx"])
+            _diag_png, _err = _p2p(_clean, 1)
             if _diag_png:
-                _diag_png = _dgm.crop_to_content(
-                    _diag_png, _dgm.content_bbox(_clean_pptx))
+                _diag_png = _dgm.crop_to_content(_diag_png, _dgm.content_bbox(_clean))
             else:
                 print(f"[요약본] 구조도를 그림으로 못 바꿈: {_err}")
         except Exception as _de:
             print(f"[요약본] 구조도 그림 변환 실패: {_de}")
     if _diag_png:
         try:
-            _diag_shape = s3.shapes.add_picture(
-                io.BytesIO(_diag_png), Inches(0.25), Inches(0.39),
-                width=Inches(4.90))
-            _diag_shape.name = "금융구조도"
-            _border(_diag_shape)
-            _lb = _clone_at_end(s3, _lbl_proto) if _lbl_proto is not None else None
-            if _lb is not None:
-                _replace_text_keep_runs(_lb.text_frame, "금융구조도")
-                _lb.name = "금융구조도라벨"
+            _ds = s3.shapes.add_picture(io.BytesIO(_diag_png), Inches(0.25), Inches(0.39), width=Inches(4.90))
+            _ds.name = "블록:금융구조도:본문"
+            _border(_ds)
         except Exception as _de:
-            print(f"[요약본] 금융구조도(이미지) 넣기 실패: {_de}")
-    elif _diag.get("pptx") and os.path.exists(_diag["pptx"]):
-        try:                       # 그림으로 못 바꾸면 도형째라도 넣는다
-            import diagram as _dgm
-            _diag_shape = _dgm.insert_diagram(s3, _diag["pptx"])
-        except Exception as _de:
-            print(f"[요약본] 금융구조도(PPT) 넣기 실패: {_de}")
-
-    if _diag_shape is None and any(
-            "금융구조도" in (_s.get(_side) or [])
-            for _s in (slots, slots2) for _side in ("left", "right")):
+            print(f"[요약본] 금융구조도 넣기 실패: {_de}")
+    elif "금융구조도" in _wanted:
         print("[요약본] 경고: 금융구조도를 골랐는데 넣을 구조도가 없습니다 "
-              "— 3단계에서 '미리보기 만들기' 를 눌러 구조도를 만들어 주세요.")
+              "— 3단계에서 구조도를 골라 항목을 채워 주세요.")
 
     def _blocks_of(slide):
-        """그 슬라이드의 '항목명 → (라벨, 본문)' 지도.
-           복제본도 표 순서·라벨 문구가 같으므로 똑같이 찾을 수 있다."""
-        ts = [sh for sh in slide.shapes if sh.has_table]
-        L, TR, F, C, B, SC = (ts + [None] * 6)[:6]
-        pic = next((sh for sh in slide.shapes
-                    if sh.shape_type == 13 and (sh.width or 0) > Inches(4)
-                    and (sh.top or 0) < Inches(2.6)), None)
-        m = {
-            "사모사채개요": (None, B),
-            "담보대출조건": (_find_label(slide, "담보대출"), L),
-            "대출조건표":   (None, TR),
-            "사업일정":     (_find_label(slide, "사업일정"), SC),
-            "법인개요":     (_find_label(slide, "법인개요"), C),
-            "재무제표":     (_find_label(slide, "재무현황"), F),
-            "조감도":       (None, pic),
-            # 복제된 2페이지에도 같은 이름의 그룹이 생기므로 이름으로 찾는다
-            # (s3 의 도형을 그대로 가리키면 2페이지에서 엉뚱한 걸 건드린다)
-            "금융구조도":   (next((sh for sh in slide.shapes
-                                    if sh.name == "금융구조도라벨"), None),
-                             next((sh for sh in slide.shapes
-                                   if sh.name == "금융구조도"), None)),
-        }
-        # 뒤에 붙인 '그 밖의 내용' 블록 — 만든 순서 = 표 순서.
-        for _i, _k in enumerate(_extra_order):
-            _ti = _FIXED_N + _i
-            m[_k] = (_find_label(slide, _k), ts[_ti] if _ti < len(ts) else None)
-        # 원본에서 그대로 옮긴 표 — 그 뒤에 순서대로 붙어 있다.
-        _base = _FIXED_N + len(_extra_order)
-        for _i, _k in enumerate(_orig_order):
-            _ti = _base + _i
-            # 라벨은 **이름**으로 찾는다(글자로 찾으면 틀의 같은 이름 라벨이 먼저 잡힌다).
-            _nm = f"원본표라벨{_i}"
-            m[_k] = (next((sh for sh in slide.shapes if sh.name == _nm), None),
-                     ts[_ti] if _ti < len(ts) else None)
+        m = {}
+        for sh in slide.shapes:
+            nm = sh.name or ""
+            if nm.startswith("블록:"):
+                _, key, kind = nm.split(":", 2)
+                lb, bd = m.get(key, (None, None))
+                if kind == "라벨":
+                    lb = sh
+                elif kind == "본문":
+                    bd = sh
+                m[key] = (lb, bd)
         return m
 
     def _arrange(slide, sl, tag):
-        """고른 블록만 남기고 위에서부터 다시 쌓는다."""
-        # ★칸은 사용자가 고른 그대로 쓴다. 임의로 묶거나 끼워 넣지 않는다
-        #   (대출조건표도 별개 항목으로 원하는 자리에 배치 — 자동으로 붙이지 않음).
         BL = _blocks_of(slide)
         used = {k for side in ("left", "right") for k in sl.get(side, [])}
         for key, (lb, bd) in BL.items():
@@ -1042,62 +1071,33 @@ def build_summary(data: dict, pdf_path: str, out_path: str, pages: int = 1,
                 continue
             for sh in (lb, bd):
                 if sh is not None:
-                    try:
+                    sh._element.getparent().remove(sh._element)
+            if key == "담보대출조건":
+                for sh in list(slide.shapes):
+                    if sh.name == "블록:담보대출조건:부속":
                         sh._element.getparent().remove(sh._element)
-                    except Exception:
-                        pass
         _BOT, _TOP = 7.28, 0.39
         for side, x, w, nm in (("left", 0.25, 4.90, "좌단"), ("right", 5.26, 5.32, "우단")):
             seq = [BL[k] for k in sl.get(side, []) if k in BL]
             seq = [(lb, bd) for lb, bd in seq if bd is not None or lb is not None]
             end = _stack(seq, x_in=x, w_in=w, top_in=_TOP, bottom_in=_BOT)
-
-            # ★사용자 지시: 글씨는 9pt 고정, **넘쳐도 줄이지 않는다.**
-            #   (표 글자가 6pt 까지 작아져 칸마다 크기가 달라 보였다)
-            #   자리만 다시 잡고 크기는 그대로 둔다.
-            _gap, _lgap, _try = 0.16, 0.05, 0
-            for _try in range(0):
-                if end <= _BOT:
-                    break
-                _avail, _used = _BOT - _TOP, end - _TOP
-                ratio = max(0.72, (_avail / _used) ** 0.5)   # 한 번에 확 줄이지 않는다
-                for _lb, _bd in seq:
-                    if _bd is None:
-                        continue
-                    if _bd.has_table:
-                        _scale_table_font(_bd, ratio)
-                    elif _bd.shape_type == 13:               # 조감도 등 그림
-                        _bd.height = int(max(Inches(0.8), (_bd.height or 0) * ratio))
-                _gap, _lgap = max(0.07, _gap * ratio), max(0.03, _lgap * ratio)
-                end = _stack(seq, x_in=x, w_in=w, top_in=_TOP, bottom_in=_BOT,
-                             gap_in=_gap, label_gap_in=_lgap)
-
             if end > _BOT:
-                print(f"[요약본] 경고: {tag} {nm} 내용이 {end - _BOT:.2f}in 넘침 "
-                      f"— 글자를 최소까지 줄였는데도 안 들어감. 칸을 줄이거나 "
-                      f"페이지를 나눠야 함")
-            elif _try:
-                print(f"[요약본] {tag} {nm}: 내용이 많아 표 글자를 줄여 맞췄음")
+                print(f"[요약본] 경고: {tag} {nm} 내용이 {end - _BOT:.2f}in 넘침 — 칸을 줄이거나 쪽을 늘려 주세요")
 
-    if pages >= 2:
-        # ★내용을 다 채운 뒤 통째로 복제 → 각 장에서 필요없는 블록만 지운다.
-        #   (빈 슬라이드를 새로 만들어 채우면 서식·표 스타일을 다시 맞춰야 해서 위험)
-        s3b = _dup_slide_after(prs, s3, 2)
-        # ★복제본의 그림은 관계(rel)가 원본 파트를 가리켜 '그림을 표시할 수 없습니다'로 깨진다.
-        #   둘째 장에서 조감도를 안 쓰면 그냥 지운다(쓰는 경우만 남기고 아래에서 재삽입).
-        _keep_pic2 = "조감도" in (list(slots2.get("left") or []) +
-                                  list(slots2.get("right") or []))
-        for sh in list(s3b.shapes):
-            if sh.shape_type == 13 and (sh.width or 0) > Inches(1.8) and not _keep_pic2:
-                sh._element.getparent().remove(sh._element)
-        _arrange(s3, slots, "핵심요약 1/2")
-        _arrange(s3b, slots2, "핵심요약 2/2")
-    else:
-        _arrange(s3, slots, "핵심요약")
+    # 내용 쪽 복제(채운 뒤 통째로) → 쪽마다 고른 것만 남긴다
+    copies = [s3]
+    for k in range(1, pages):
+        copies.append(_dup_slide_after(prs, s3, 2 + k - 1))
+    for k, sl in enumerate(copies):
+        _arrange(sl, slots_pages[k], f"내용 {k + 1}/{pages}")
+    # 4번 틀 쪽(부품만 빌려 온 것)은 결과에서 뺀다 — 관계까지 끊어야 파일 이름이 안 겹친다
+    for _sid in list(prs.slides._sldIdLst):
+        if prs.part.related_part(_sid.rId) is s4.part:
+            prs.part.drop_rel(_sid.rId)
+            prs.slides._sldIdLst.remove(_sid)
 
-    # ★맨 마지막에 모든 장의 불릿 간격·줄맞춤을 같게 맞춘다.
-    for _sl in prs.slides:
-        normalize_bullets(_sl)
-
+    for _k, _sl in enumerate(prs.slides):
+        if _k != 1:                                         # Deal Highlight 은 틀의 → 간격 그대로
+            normalize_bullets(_sl)
     prs.save(out_path)
     return out_path

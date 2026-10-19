@@ -4,7 +4,7 @@
 요약본·변환기와 목적이 다르다.
   · 요약본/변환기 : 원본에서 **내용만** 뽑아 회사 양식으로 **다시 그린다**.
   · 여기          : 원본의 **모습 그대로** 옮긴다. 자리·표 색깔·표 선을 원본대로 두고,
-                    글꼴만 회사 글꼴(피플폰트)로, 크기는 9pt 로 고정한다.
+                    글꼴만 회사 글꼴(Pretendard ExtraBold·Light)로, 크기는 9pt 로 고정한다.
 
 ★표는 **진짜 PPT 표**로 만든다. 글자가 표 칸 안에 들어가야 나중에 고치기 쉽다.
 
@@ -39,8 +39,8 @@ from pptx.oxml.ns import nsdecls, qn
 from pptx.util import Emu, Pt
 
 # ── 고정 규칙(사용자 확정) ───────────────────────────
-FONT_BOLD = "피플폰트 Bold"
-FONT_BODY = "피플폰트 Light"
+FONT_BOLD = "Pretendard ExtraBold"
+FONT_BODY = "Pretendard Light"
 FONT_SIZE = 10.0                # 전부 10pt 로 고정한다(사용자 확정, 2026-09-17)
 
 # ★표 머리글·진하게 칠한 자리는 **전부 이 남색**으로 통일한다(사용자 확정).
@@ -74,8 +74,8 @@ def _is_dark(hx):
 #   그래서 **피플폰트 → 맑은 고딕 → Segoe UI Symbol** 순으로 넘긴다.
 FONT_FALLBACK = ["맑은 고딕", "Segoe UI Symbol"]
 _FONT_FILES = {
-    FONT_BODY: "PEOPLEFONTL.TTF",
-    FONT_BOLD: "PEOPLEFONTB.TTF",
+    FONT_BODY: "Pretendard-Light.otf",
+    FONT_BOLD: "Pretendard-ExtraBold.otf",
     "맑은 고딕": r"C:\Windows\Fonts\malgun.ttf",
     "Segoe UI Symbol": r"C:\Windows\Fonts\seguisym.ttf",
 }
@@ -1276,7 +1276,7 @@ def _has_glyph(name, ch):
 
 
 def _split_by_glyph(text, name):
-    """피플폰트에 없는 글자만 떼어 대체 글꼴로 넘긴다 → [(글자들, 글꼴)]"""
+    """회사 글꼴(Pretendard)에 없는 글자만 떼어 대체 글꼴로 넘긴다 → [(글자들, 글꼴)]"""
     if name not in (FONT_BODY, FONT_BOLD):    # 기호 글꼴 등은 그대로 둔다
         return [(text, name)]
 
@@ -1452,7 +1452,7 @@ def _align_of(bbox, x0, x1):
 
 
 def _text_w(text, size_pt):
-    """피플폰트로 이 글이 몇 pt 폭인지. 글꼴 파일을 못 읽으면 대략치."""
+    """회사 글꼴(Pretendard)로 이 글이 몇 pt 폭인지. 글꼴 파일을 못 읽으면 대략치."""
     f = _FONT_CACHE.get(FONT_BODY)
     if f is None:
         _has_glyph(FONT_BODY, "가")

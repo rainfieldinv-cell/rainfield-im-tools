@@ -41,16 +41,16 @@ SLIDE_HEIGHT = Cm(19.05)  # 세로 19.05cm → 레이아웃.pptx 실측값 (이 
 # TTF 파일에 등록된 정확한 폰트 패밀리 이름을 써야 합니다
 # 여기를 수정하면 PPT 전체 폰트가 바뀝니다
 # ─────────────────────────────────────────────
-FONT_BOLD  = "피플폰트 Bold"    # 제목·강조 텍스트용 (여기를 수정하면 굵은 폰트가 바뀜)
-FONT_LIGHT = "피플폰트 Light"   # 본문·캡션용      (여기를 수정하면 가는 폰트가 바뀜)
+FONT_BOLD  = "Pretendard Variable ExtraBold"    # 제목·강조 텍스트용 (여기를 수정하면 굵은 폰트가 바뀜)
+FONT_LIGHT = "Pretendard Light"   # 본문·캡션용      (여기를 수정하면 가는 폰트가 바뀜)
 
 
 # ─────────────────────────────────────────────
 # [폰트 파일 경로]
 # fonts/ 폴더 안의 TTF 파일 경로 (절대 경로로 자동 계산)
 # ─────────────────────────────────────────────
-FONT_PATH_BOLD  = os.path.join(BASE_DIR, "fonts", "PEOPLEFONTB.TTF")
-FONT_PATH_LIGHT = os.path.join(BASE_DIR, "fonts", "PEOPLEFONTL.TTF")
+FONT_PATH_BOLD  = os.path.join(BASE_DIR, "fonts", "Pretendard-ExtraBold.otf")
+FONT_PATH_LIGHT = os.path.join(BASE_DIR, "fonts", "Pretendard-Light.otf")
 
 
 # ─────────────────────────────────────────────
@@ -96,23 +96,22 @@ FONT_SIZE_FOOTER  = Pt(8)     # 하단 푸터·면책 문구 크기
 # 레이아웃.pptx를 교체하면 이 값도 함께 수정해야 합니다.
 # ─────────────────────────────────────────────
 SLIDE_INDEX_MAP = {
+    # ★2026-10-19 사용자가 레이아웃을 바꿈: 표지 다음에 'Overview'(글+사진) 쪽이 새로 들어와 뒤가 한 칸씩 밀렸다(14장).
     "cover":              0,   # 표지 (사업명, 날짜, 이미지)
-    "executive_summary":  1,   # Executive Summary (표지 다음, 전체 내용 요약 3섹션)
-    "toc_4":              2,   # 목차 4개 항목 (01~04)
-    "toc_5":              3,   # 목차 5개 항목 (01~05)
-    "section_divider":    4,   # 섹션 구분 (큰 번호 + 섹션명) — 하나를 복제해 번호·제목만 교체
-    # ★1.1 본건 사모사채 개요 = 5번 고정 페이지 (제목·소제목 문구가 템플릿에 박혀 있음)
-    #   9행×2열 표(사모사채명/사채유형/발행인/기초자산/발행금액/발행일/만기일/금융조건/이자지급주기)
-    #   → 구분열(col0)은 절대 불변, 값열(col1)만 채운다. build_slide_5_sasae_overview()가 사용.
-    "bond_overview":        5,   # 1.1 본건 사모사채 개요 (고정 표 페이지)
-    # ★2.1 금융 구조도 = 7번 고정 페이지 (구조도 도형/표 그대로 + 상단 '본건은…' 인트로만 채움)
-    "finance_structure":    7,   # 2.1 금융 구조도 (고정 구조도 페이지)
-    # ★내용 페이지 = 9번 '사용자 지정 레이아웃' (제목/소제목/페이지요약 헤더 3칸 + 푸터)
-    #   → 이 레이아웃이라야 _fill_header()가 기존 글상자를 그대로 채움(새 글상자 덮어쓰기 방지)
-    "content":              9,   # 내용 페이지 — 텍스트 위주 (제목+소제목+요약)
-    "content_with_image":   9,   # 내용 페이지 — 이미지 포함 (같은 내용 템플릿 사용)
-    "investment_structure": 7,   # 투자구조도 = 2.1 금융 구조도 고정 레이아웃 사용
-    "contact":             12,   # 연락처 페이지 (마지막) — 레이아웃 13장으로 늘어 10→12
+    "overview":           1,   # Overview 하이라이트 (글 상자 + 원본 사진) — 새로 생김
+    "executive_summary":  2,   # Deal Highlight (<제목> + 대괄호 상자 3개)
+    "toc_4":              3,   # 목차 4개 항목 (01~04)
+    "toc_5":              4,   # 목차 5개 항목 (01~05)
+    "section_divider":    5,   # 섹션 구분 (큰 번호 + 섹션명) — 하나를 복제해 번호·제목만 교체
+    # ★1.1 본건 사모사채 개요 고정 페이지 (구분열 불변, 값열만 채움) — build_slide_5_sasae_overview()
+    "bond_overview":        6,
+    # ★2.1 금융 구조도 고정 페이지 (구조도 도형/표 그대로 + 상단 '본건은…' 인트로만 채움)
+    "finance_structure":    8,
+    # ★내용 페이지 = '사용자 지정 레이아웃' (제목/소제목/페이지요약 헤더 3칸 + 푸터) → _fill_header()
+    "content":             10,
+    "content_with_image":  10,
+    "investment_structure": 8,   # 투자구조도 = 2.1 금융 구조도 고정 레이아웃 사용
+    "contact":             13,   # 연락처 페이지 (마지막)
 }
 
 # ─────────────────────────────────────────────

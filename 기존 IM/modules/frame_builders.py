@@ -158,7 +158,7 @@ def build_frame_e_slide(prs, *, title: str, subtitle: str, intro: str,
         sub = slide.shapes.add_textbox(Inches(0.43), Inches(1.5), Inches(3.0), Inches(0.3))
         run = sub.text_frame.paragraphs[0].add_run()
         run.text = sub_label
-        run.font.name = "피플폰트 Bold"
+        run.font.name = "Pretendard Variable ExtraBold"
         run.font.size = Pt(12)
         run.font.color.rgb = PALETTE["navy_dark"]
 
@@ -348,8 +348,8 @@ def build_page_auto(prs, page: dict, *, title: str, subtitle: str,
 #   ★본문은 절대 제목/소제목 자리에 넣지 않고 새 글상자로. 글상자 내부여백 0.
 # ──────────────────────────────────────────────────────
 _BLACK = PALETTE["black"]
-_FONT_LIGHT = "피플폰트 Light"
-_FONT_BOLD  = "피플폰트 Bold"
+_FONT_LIGHT = "Pretendard Light"
+_FONT_BOLD  = "Pretendard Variable ExtraBold"
 
 # 대전 실측 좌표(in)
 _INTRO_L, _INTRO_T, _INTRO_W = 0.43, 1.01, 8.65

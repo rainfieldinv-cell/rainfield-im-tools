@@ -7,7 +7,7 @@ from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.oxml.ns import qn
 
-_FONT = "피플폰트 Bold"
+_FONT = "Pretendard Variable ExtraBold"
 NAVY = RGBColor(0x08, 0x37, 0x7C)
 BLUE = RGBColor(0x3E, 0x95, 0xBE)
 RED = RGBColor(0xC0, 0x00, 0x00)
