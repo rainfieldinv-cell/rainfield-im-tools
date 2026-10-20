@@ -2868,6 +2868,7 @@ def _fit_page(secs, grps, box, lines=None):
     #   예전엔 통째로 줄여 표가 머리말·꼬리말 선보다 좁았다(방배동 86~94%, 2026-10-13 사용자 지적).
     sw = min(1.0, BOX_W_PT / max(old_w, 1))
     s = min(sw, BOX_H_PT * HEIGHT_SAFETY / max(box.height + grow, 1))
+    used = (box.height + grow) * s                         # 결과에서 쓸 높이 어림(그림 키울 남는 높이 셈에 씀)
     if lines and s < 0.999:
         # ★줄인 뒤 본문 글자를 9pt 로 다시 키우면(글자 크기 규칙) 그만큼 길어져 쪽이 넘쳤다(내곡동 하이라이트 각주 한 줄, 2026-10-15)
         #   → 커질 몫(줄 높이 × 커지는 비율, 줄바꿈 늘어남까지 1.5제곱)을 넣고 쪽에 들어가는 가장 큰 비율을 찾는다.
@@ -2877,7 +2878,10 @@ def _fit_page(secs, grps, box, lines=None):
             extra = 0.0
             for sz, h in lines:
                 v = sz * x
-                if MIN_SZ / 2 - 1 <= v < MIN_SZ / 2:
+                # ★_sz_target 은 '원본' 8~10.5pt 글을 줄인 비율과 상관없이 9pt 로 둔다 → 조건도 원본 크기로.
+                #   예전엔 줄인 크기가 8~9pt 인 것만 셌다 → 원본 8pt 를 0.86 배 한 6.9pt 가 9pt 로 커지는 몫이 빠져
+                #   표 마지막 줄이 넘쳤다(내곡 33·44쪽, 2026-10-20)
+                if 8 <= sz <= 10.5 and v < MIN_SZ / 2:
                     extra += h * ((MIN_SZ / 2 / v) ** 1.5 - 1)
             return x * (H + extra)
         lo, hi = 0.3, s
@@ -2889,6 +2893,7 @@ def _fit_page(secs, grps, box, lines=None):
                 else:
                     hi = mid
             s = lo
+        used = need(s)
     for i, sec in enumerate(secs):
         _set_geometry(sec, new_page=(i == 0))
         cols = sec._sectPr.find(qn("w:cols"))               # 2단 같은 단 너비·간격도 같은 비율로
@@ -2920,12 +2925,71 @@ def _fit_page(secs, grps, box, lines=None):
         for el in grp:
             if el.tag == qn("w:tbl"):
                 stretch_table_to_width(el, BOX_W_PT * 20)
+    # 남는 높이 = 쪽 높이 − (내용 + 표 칸이 Pretendard 로 늘어날 몫) × s. 예전엔 늘어날 몫(grow)을 빼먹어 남는 높이를
+    #   부풀려 셌고, 그림이 커지며 쪽 끝 표 줄이 넘쳤다(내곡동 59→61쪽, 2026-10-20) → 빼고, 어림 오차 몫으로 절반만 쓴다
+    #   + 어림 오차 몫으로 쪽 높이 5% 는 남겨 둔다(그림이 6pt 만 커져도 꽉 찬 쪽 끝 각주가 넘쳤다 — 내곡 31쪽)
+    #   + 9pt 로 다시 커지는 몫(used 에 포함)도 빼야 한다 — 빼먹어 내곡 29쪽이 183pt 남는다고 셌다
+    grow_pictures_to_width(grps, 0.5 * max(0.0, BOX_H_PT * (HEIGHT_SAFETY - 0.05) - used))
     return s, box.height * s
+
+
+def grow_pictures_to_width(grps, slack_pt):
+    """표 밖에 홀로 있는 그림을 표처럼 본문 폭(머리말 줄 길이)까지 키운다 — 비율 그대로(자르지 않음).
+    쪽에 남는 높이(slack)만큼만 키우고, 모자라면 들어가는 만큼 최대한 키워 가운데 정렬.
+    ★2026-10-20 사용자: 표는 다 본문 폭인데 그림만 좁다 — 쪽 맞춤에서 그림은 세로 비율(s)로 같이 줄고 표만 다시 늘렸다."""
+    from docx.oxml.ns import qn
+    WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
+    A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    target = BOX_W_PT * 12700
+    items = []
+    for grp in grps:
+        for el in grp:
+            if el.tag != qn("w:p") or _par_text(el).strip():
+                continue
+            for inl in el.iter(WP + "inline"):
+                ext = inl.find(WP + "extent")
+                try:
+                    w, h = int(ext.get("cx")), int(ext.get("cy"))
+                except (TypeError, ValueError):
+                    continue
+                if w <= 0 or h <= 0 or w >= target * 0.98 or w >= 5 * h:   # 납작한 띠(쪽 장식)는 그대로
+                    continue
+                items.append((el, inl, ext, w, h, h * (target / w) - h))
+    if not items:
+        return 0
+    need = sum(x[5] for x in items)
+    slack = max(0.0, slack_pt * 12700)
+    k = min(1.0, slack / need) if need > 0 else 0.0
+    n = 0
+    for p, inl, ext, w, h, extra in items:
+        f = 1.0 + k * (target / w - 1.0)
+        if f <= 1.001:
+            continue
+        nw, nh = int(w * f), int(h * f)
+        ext.set("cx", str(nw)); ext.set("cy", str(nh))
+        for x in inl.iter(A + "ext"):
+            if x.getparent().tag == A + "xfrm":
+                x.set("cx", str(nw)); x.set("cy", str(nh))
+        ppr = p.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = p.makeelement(qn("w:pPr"), {})
+            p.insert(0, ppr)
+        for e in ppr.findall(qn("w:ind")):
+            ppr.remove(e)
+        jc = ppr.find(qn("w:jc"))
+        if jc is None:
+            jc = ppr.makeelement(qn("w:jc"), {})
+            ppr.append(jc)
+        jc.set(qn("w:val"), "center")
+        n += 1
+    return n
 
 
 # ── 표 칸이 늘어날 높이 어림 ──
 # 줄 높이를 '최소' 로 풀어 주면(loosen_row_heights) 글이 넘치는 칸이 늘어나 쪽이 넘친다(고산 32→37쪽).
 # → 쪽을 줄이기 전에 칸마다 '이 글이 Pretendard 로 몇 줄·몇 pt 필요한가' 를 어림해 늘어날 몫만큼 더 줄인다.
+CELL_MIN_PITCH = float(os.environ.get("CF_CELL_MIN_PITCH", "1.35"))   # 칸·상자 안 줄 간격 최소(글자 크기 배)
+_BUMP = [True]   # 어림에 위 최소 간격을 넣을지(_row_growth 가 '넣은 것 − 뺀 것' 을 따로 셀 때 끔)
 LINE_EM = 1.5625             # 워드가 실제로 그리는 Pretendard 한 줄 높이 = 글자 크기 × 1.5625
                              # (2026-10-12 시험 문서로 잰 값: 8pt→12.5, 9pt→14.06, 10pt→15.6. 글꼴 파일 값 1.19 로 셈하면 모자라 잘렸다)
 WIDE_EM, NARROW_EM = 0.95, 0.55
@@ -2985,6 +3049,11 @@ def _para_height(p, width_pt, last=False):
     one = sz * LINE_EM
     if line:
         one = line / 20 if rule == "exact" else max(one, line / 20) if rule == "atLeast" else one * line / 240
+        if rule == "auto" and line < 240 and _BUMP[0]:
+            # ★엔진(fix_compressed_line_spacing)이 칸·상자 안 1 미만 배수를 고정 간격(최소 1.35 배)으로 올린다
+            #   → 어림도 같게(안 그러면 쪽을 덜 줄여 표 마지막 줄이 다음 쪽으로 넘쳤다 — 돈암 10쪽, 2026-10-20). 본문 문단은 그대로.
+            if any(a.tag in (qn("w:tc"), qn("w:txbxContent")) for a in p.iterancestors()):
+                one = max(one, sz * CELL_MIN_PITCH)
     return lines * one + (get("before") or 0) / 20 + (0 if last else (get("after") or 0) / 20)
 
 
@@ -3008,11 +3077,14 @@ def _row_need(tr, safety=None):
         # 칸 안쪽 여백은 그 칸에 적힌 값(pdf2docx 는 대개 0) — 없을 때만 워드 기본 5.4pt×2.
         # ★예전엔 늘 11pt 를 뺐다 → 좁은 칸(30pt)에서 한 글자씩 꺾인다고 어림해 쪽을 너무 줄였다(돈암동 14→15쪽).
         mar = tc.find(f"{qn('w:tcPr')}/{qn('w:tcMar')}")
-        pad = 10.8
+        pad, vpad = 10.8, 0.0
         if mar is not None:
             vals = [int(m.get(qn("w:w"))) / 20 for m in mar if (m.get(qn("w:w")) or "").isdigit()
                     and m.tag in (qn("w:start"), qn("w:end"), qn("w:left"), qn("w:right"))]
             pad = sum(vals) if vals else pad
+            # 칸 위·아래 여백도 줄 높이에 얹힌다(예전엔 안 세 빽빽한 표 마지막 줄이 넘쳤다 — 내곡 43쪽, 2026-10-20)
+            vpad = sum(int(m.get(qn("w:w"))) / 20 for m in mar if (m.get(qn("w:w")) or "").isdigit()
+                       and m.tag in (qn("w:top"), qn("w:bottom")))
         width = int(w.get(qn("w:w"))) / 20 - pad if w is not None and (w.get(qn("w:w")) or "").isdigit() else 200
         # ★칸 끝의 빈 문단·마지막 문단 뒤 간격은 잘려도 안 보인다 → 세지 않는다.
         #   (돈암동: 이걸 세서 148줄이 '넘친다' 고 풀었더니 실제로 칸이 늘어 쪽이 넘쳤다. 화면엔 잘린 글이 없었다)
@@ -3020,7 +3092,7 @@ def _row_need(tr, safety=None):
         while kids and kids[-1].tag == qn("w:p") and not "".join(t.text or "" for t in kids[-1].iter(qn("w:t"))).strip() \
                 and kids[-1].find(".//" + qn("w:drawing")) is None:
             kids.pop()
-        hh = 0.0
+        hh = vpad if kids else 0.0
         for i, ch in enumerate(kids):
             if ch.tag == qn("w:p"):
                 hh += _para_height(ch, width, last=(i == len(kids) - 1))
@@ -3030,9 +3102,15 @@ def _row_need(tr, safety=None):
     return need * safety
 
 
+_LOOSE = [False]   # True: 글 든 '고정' 줄도 '최소' 로 셈(엔진 loosen_exact_rows 가 결국 다 풀어 준다)
+
+
 def _row_actual(tr, safety=None):
     h, rule = _row_h(tr)
-    return h if rule == "exact" else max(h, _row_need(tr, safety))
+    if rule == "exact" and not (_LOOSE[0] and any((t.text or "").strip() for t in tr.iter(
+            "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"))):
+        return h
+    return max(h, _row_need(tr, safety))
 
 
 def _row_growth(el):
@@ -3050,9 +3128,26 @@ def _row_growth(el):
     for t in tbls:
         rows = t.findall(qn("w:tr"))
         orig = sum(_row_h(tr)[0] for tr in rows)
-        est = sum(_row_actual(tr, 1.0) for tr in rows)
-        total += min(max(0.0, est - orig), orig * TABLE_GROW_MAX)
+        # ★글 든 '고정' 줄은 엔진(loosen_exact_rows)이 '최소' 로 풀어 늘어난다 → 어림도 풀린 것으로
+        #   (안 그러면 늘 0 으로 셌고, 빽빽한 표 쪽 끝 각주가 다음 쪽으로 넘쳤다 — 효자 16·22쪽, 2026-10-20)
+        _LOOSE[0] = True
+        try:
+            bumped = [_row_need(tr, 1.0) for tr in rows]
+            _BUMP[0] = False
+            try:
+                flat = [_row_need(tr, 1.0) for tr in rows]
+                plain = sum(_row_actual(tr, 1.0) for tr in rows)   # 칸 최소 간격 빼고 어림
+            finally:
+                _BUMP[0] = True
+        finally:
+            _LOOSE[0] = False
+        # ★줄 간격 1 미만 → 고정 간격(최소 1.35배)으로 늘어나는 몫은 어림이 아니라 정해진 값 → 25% 묶음 밖에서,
+        #   줄 높이가 넉넉해 보여도 그대로 더한다(묶음 안에 넣거나 '넉넉하면 0' 으로 셌더니 빽빽한 표 쪽 끝 줄·각주가
+        #   다음 쪽으로 넘쳤다 — 돈암 4·9쪽, 효자 16·22쪽, 2026-10-20). 조금 더 줄이는 쪽이 안전.
+        bump = sum(max(0.0, x - y) for x, y in zip(bumped, flat))
+        total += min(max(0.0, plain - orig), orig * TABLE_GROW_MAX) + bump
     return total
+
 
 
 # ── 같은 비율로 줄이기 ──

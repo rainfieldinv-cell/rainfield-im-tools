@@ -965,8 +965,19 @@ def rebuild_page(page, groups, part=None):
             continue
         # ★표 위·아래 끝에 걸친 큰 그림(+그 테두리)은 표가 아니다 — 내곡 14쪽 지도 테두리가 아래 표와 한 표로 잡혀 표가 갈라졌다
         cut_top = False
+        _vsegs = [r for r, o, real in _segs(lines, fills, tb) if o == "v" and real]
+
+        def _in_cell(ir):
+            """그림 양옆(그림 높이의 60% 이상)에 표 세로선이 있으면 칸 안 그림이다 — 잘라내면 안 된다.
+            ★등촌역 6쪽 '조감도' 칸 그림이 표 아래 끝에 닿아 '표 밖 그림' 으로 잘려 나가 칸째 사라졌다(2026-10-20)."""
+            def cov(xs):
+                return sum(max(0.0, min(r.y1, ir.y1) - max(r.y0, ir.y0)) for r in _vsegs if xs(r))
+            left = cov(lambda r: ir.x0 - 12 <= (r.x0 + r.x1) / 2 <= ir.x0 + 2)
+            right = cov(lambda r: ir.x1 - 2 <= (r.x0 + r.x1) / 2 <= ir.x1 + 12)
+            # 표 바깥 테두리가 없는 표(등촌: 왼쪽 칸 나눔 선 하나뿐)도 있다 → 한쪽에 선이 있고 다른 쪽은 표 끝 안이면 칸 안
+            return (left >= ir.height * 0.6 and (right >= ir.height * 0.6 or ir.x1 <= tb.x1 + 3)) or                 (right >= ir.height * 0.6 and ir.x0 >= tb.x0 - 3)
         for ir in big_imgs:
-            if not ir.intersects(tb) or ir.width < tb.width * 0.5:
+            if not ir.intersects(tb) or ir.width < tb.width * 0.5 or _in_cell(ir):
                 continue
             if ir.y0 <= tb.y0 + 6 and ir.y1 < tb.y1 - 15:
                 tb = fitz.Rect(tb.x0, ir.y1 + 0.5, tb.x1, tb.y1)

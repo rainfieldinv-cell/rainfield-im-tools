@@ -26,7 +26,7 @@ from PIL import Image
 import docx
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
-from docx.shared import Pt
+from docx.shared import Pt, Inches
 
 import pages
 
@@ -1145,6 +1145,65 @@ def _text_width_pt(text, size_pt, bold=True):
     return w * size_pt * (1.04 if bold else 1.0)
 
 
+def fit_cover_boxes(doc):
+    """표지(첫 구역) 글상자·사진을 회사 규격에 맞춘다(2026-10-20 사용자 사진).
+    ① 'Strictly Confidential' 빨간 상자: 글이 'Strictly' 까지만 보였다 — 글꼴이 Pretendard 로 바뀌어 넓어졌는데
+       상자 폭이 고정이라 꺾여 둘째 줄이 잘림. → 줄 바꿈 없이 글 길이에 맞춰 늘고, 본문 왼쪽 끝에 맞춘다.
+    ② 표지 사진: 가운데.  ③ [Disclaimer] 상자: 본문 폭(머리말 줄 길이)만큼 넓게."""
+    import pdf_input as _pi
+    WPS = "{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}"
+    body = doc.element.body
+    first_sect = next((i for i, el in enumerate(body) if el.tag == qn("w:p")
+                       and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None), None)
+    if first_sect is None:
+        return 0
+    cover = list(body)[:first_sect + 1]
+    body_w = int(_pi.BOX_W_PT * 12700)
+    n = 0
+    for el in cover:
+        for a in el.iter("{%s}anchor" % NS["wp"]):
+            t = "".join(x.text or "" for x in a.iter(qn("w:t")))
+            ext = a.find("wp:extent", NS)
+            ph = a.find("wp:positionH", NS)
+            if "Strictly" in t:
+                bp = a.find(".//" + WPS + "bodyPr")
+                if bp is not None:
+                    bp.set("wrap", "none")
+                    for ch in list(bp):
+                        if etree.QName(ch).localname in ("noAutofit", "normAutofit", "spAutoFit"):
+                            bp.remove(ch)
+                    etree.SubElement(bp, "{%s}spAutoFit" % NS["a"])
+                w = int(Inches(_text_width_pt(t.strip(), 10.5, bold=True) / 72.0 + 0.25))
+                ext.set("cx", str(max(int(ext.get("cx")), w)))
+                for x in a.iter("{%s}ext" % NS["a"]):
+                    if etree.QName(x.getparent()).localname == "xfrm":
+                        x.set("cx", ext.get("cx"))
+                if ph is not None:
+                    ph.set("relativeFrom", "margin")
+                    for ch in list(ph):
+                        ph.remove(ch)
+                    etree.SubElement(ph, "{%s}posOffset" % NS["wp"]).text = "0"
+                n += 1
+            elif "Disclaimer" in t:
+                ext.set("cx", str(body_w))
+                for x in a.iter("{%s}ext" % NS["a"]):
+                    if etree.QName(x.getparent()).localname == "xfrm":
+                        x.set("cx", str(body_w))
+                if ph is not None:
+                    ph.set("relativeFrom", "margin")
+                    for ch in list(ph):
+                        ph.remove(ch)
+                    etree.SubElement(ph, "{%s}posOffset" % NS["wp"]).text = "0"
+                n += 1
+            elif a.find(".//a:blip", NS) is not None and int(ext.get("cy")) > 1500000 and ph is not None:
+                ph.set("relativeFrom", "margin")
+                for ch in list(ph):
+                    ph.remove(ch)
+                etree.SubElement(ph, "{%s}align" % NS["wp"]).text = "center"
+                n += 1
+    return n
+
+
 def _layout_cover(els, lines):
     """제목 상자를 글 길이에 맞춰 늘리고, 그만큼 날짜·사진을 아래로 내린다(2026-10-08 사용자 지적).
 
@@ -1171,19 +1230,12 @@ def _layout_cover(els, lines):
             title = a
     if title is None:
         return
-    # ★표지 순서(2026-10-15 사용자 사진): 'Information Memorandum' → 회사 로고 → 제목 → 날짜 → 사진 → Disclaimer
-    #   (양식은 로고가 맨 위). 로고를 IM 글 바로 아래로, 제목·날짜·사진은 그만큼 내린다.
-    if logo is not None and im is not None and all(_pos_v(x) is not None for x in (logo, im, title)):
+    # ★표지 순서(2026-10-20 사용자 확정 사진): 회사 로고 → 'Information Memorandum' → 제목 → 날짜 → 사진 → Disclaimer.
+    #   로고는 IM 글 바로 위에 붙인다(양식처럼 멀리 떨어지지 않게). 10-15 에 로고를 IM 아래로 옮긴 건 잘못 — 되돌림.
+    if logo is not None and im is not None and all(_pos_v(x) is not None for x in (logo, im)):
         im_y = int(_pos_v(im).text)
-        im_h = int(im.find("wp:extent", NS).get("cy"))
         logo_h = int(logo.find("wp:extent", NS).get("cy"))
-        new_logo = im_y + im_h + 30000
-        _pos_v(logo).text = str(new_logo)
-        delta = new_logo + logo_h + 120000 - int(_pos_v(title).text)
-        if delta > 0:
-            for a in (title, date_a, pic):
-                if a is not None and _pos_v(a) is not None:
-                    _pos_v(a).text = str(int(_pos_v(a).text) + delta)
+        _pos_v(logo).text = str(max(0, im_y - logo_h - 40000))
     ext = title.find("wp:extent", NS)
     body_pr = title.find(".//{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}bodyPr")
     l_ins = int(body_pr.get("lIns", 91440)) if body_pr is not None else 91440
@@ -1714,6 +1766,25 @@ def _template_contact_els(tpl, doc):
                 if etree.QName(ch).localname in ("noAutofit", "normAutofit", "spAutoFit"):
                     bp.remove(ch)
             bp.append(etree.Element("{%s}spAutoFit" % A))
+    # ★연락처 상자도 표처럼 본문 폭(머리말 줄 길이) 그대로 — 2026-10-20 사용자가 직접 늘려 보여 줌
+    import pdf_input as _pi
+    body_w = int(_pi.BOX_W_PT * 12700)
+    WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    for el in out:
+        for anc in list(el.iter("{%s}anchor" % WP)) + list(el.iter("{%s}inline" % WP)):
+            if anc.find(".//{%s}txbx" % WPS) is None:
+                continue
+            ext = anc.find("{%s}extent" % WP)
+            ext.set("cx", str(body_w))
+            for x in anc.iter("{%s}ext" % A):
+                if etree.QName(x.getparent()).localname == "xfrm":
+                    x.set("cx", str(body_w))
+            ph = anc.find("{%s}positionH" % WP)
+            if ph is not None:
+                ph.set("relativeFrom", "margin")
+                for ch in list(ph):
+                    ph.remove(ch)
+                etree.SubElement(ph, "{%s}posOffset" % WP).text = "0"
     return out
 
 
@@ -1867,6 +1938,88 @@ def align_tables_to_body(doc):
         for jc in tpr.findall(qn("w:jc")):
             tpr.remove(jc)
         n += 1
+    return n
+
+
+def fix_compressed_line_spacing(doc):
+    """표 칸·글상자 안 줄 간격 '배수' 가 1 미만(예: 0.6)인 문단 → 같은 줄 높이의 '고정' 간격으로(최소 글자 크기 × 1.35).
+    ★원인(2026-10-20 실측): 원본 줄 간격을 맞추려고 Pretendard(한 줄 = 글자 × 1.5625) 기준 배수를 0.6~0.9 로
+      낮췄는데, 워드는 배수가 1 보다 작으면 글자 위 여백부터 깎는다 → 글이 칸 위쪽으로 붙고(세로 가운데가 안 먹은 것처럼),
+      두 줄 칸은 줄이 겹치고 첫 줄 윗부분이 잘렸다(등촌 Executive Summary 상자, 표 칸 전부).
+      '고정(exact)' 간격은 남는·모자란 높이를 글자 위아래로 나눠 가운데에 놓는다(시험 문서로 확인).
+    그림이 든 문단은 고정 간격이면 그림이 잘리므로 건드리지 않는다. 바꾼 문단 수."""
+    import pdf_input as _pi
+    n = 0
+    for p in doc.element.body.iter(qn("w:p")):
+        sp = p.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+        if sp is None or (sp.get(qn("w:lineRule")) or "auto") != "auto":
+            continue
+        try:
+            line = int(float(sp.get(qn("w:line")) or 240))
+        except ValueError:
+            continue
+        if line >= 240 or p.find(".//" + qn("w:drawing")) is not None or p.find(".//" + qn("w:pict")) is not None:
+            continue
+        if not any(a.tag in (qn("w:tc"), qn("w:txbxContent")) for a in p.iterancestors()):
+            # 본문 문단은 그대로 둔다 — 칸 가운데 맞춤 문제가 없고, 1.2 배로 올렸더니 빽빽한 쪽 끝 한 줄이
+            # 다음 쪽으로 넘쳤다(방배 3쪽·효자 17·23쪽, 2026-10-20 실측)
+            continue
+        szs = [int(x.get(qn("w:val"))) for x in p.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()]
+        size = (max(szs) if szs else 18) / 2.0
+        pitch = line / 240.0 * _pi.LINE_EM * size
+        # 칸·상자 안: 글자가 칸 위로 붙거나 잘리지 않게 최소 1.35 배(1.2 배면 Pretendard 글자 윗부분이 줄 위로 삐져나왔다)
+        pitch = max(pitch, size * _pi.CELL_MIN_PITCH)
+        sp.set(qn("w:line"), str(int(round(pitch * 20))))
+        sp.set(qn("w:lineRule"), "exact")
+        n += 1
+    return n
+
+
+def loosen_exact_rows(doc):
+    """글이 든 표 줄의 '정확히(exact)' 높이 → '최소(atLeast)'. 글꼴이 Pretendard 로 바뀌어 넓어지면 두 줄로 꺾이는데
+    높이가 고정이면 둘째 줄이 잘렸다(등촌 14쪽 회사소개 '주소' 칸, 2026-10-20). 쪽을 줄이지 않은 쪽(s=1)은
+    pdf_input 이 안 풀어 줘서 남아 있었다. 바꾼 줄 수."""
+    n = 0
+    for tr in doc.element.body.iter(qn("w:tr")):
+        h = tr.find(f"{qn('w:trPr')}/{qn('w:trHeight')}")
+        if h is not None and h.get(qn("w:hRule")) == "exact" and "".join(t.text or "" for t in tr.iter(qn("w:t"))).strip():
+            h.set(qn("w:hRule"), "atLeast")
+            n += 1
+    return n
+
+
+def paint_label_columns(doc):
+    """'구분' 칸(항목 이름 칸)도 머리글처럼 네이비 + 흰 글씨(2026-10-20 사용자: 회사소개 표처럼 항목 칸이 회색이면 그것도 구분).
+    조건: 맨 바깥 표, 머리글 줄을 뺀 줄들에서 이 열 칸이 80% 넘게 칠해져 있고(흰색 아님) 바로 오른쪽 열은 20% 미만만 칠해짐."""
+    n = 0
+    for tbl in doc.element.body.iter(qn("w:tbl")):
+        rows = tbl.findall(qn("w:tr"))
+        if len(rows) < 2:
+            continue
+        grid = []
+        for tr in rows:
+            line = []
+            for tc in tr.findall(qn("w:tc")):
+                span = tc.find(f"{qn('w:tcPr')}/{qn('w:gridSpan')}")
+                k = int(span.get(qn("w:val"))) if span is not None and (span.get(qn("w:val")) or "").isdigit() else 1
+                line += [tc] * k
+            grid.append(line)
+        ncol = max(len(r) for r in grid)
+        body_rows = [r for r in grid if not all(_fill(tc) == NAVY for tc in r if tc is not None)]
+        if len(body_rows) < 2:
+            continue
+        for c in range(ncol - 1):
+            cells = [r[c] for r in body_rows if c < len(r)]
+            nxt = [r[c + 1] for r in body_rows if c + 1 < len(r)]
+            if not cells or not nxt:
+                continue
+            filled = [tc for tc in cells if _fill(tc) and _fill(tc) != NAVY]
+            nfilled = [tc for tc in nxt if _fill(tc)]
+            if len(filled) >= 0.8 * len(cells) and len(nfilled) < 0.2 * len(nxt) and                     len({_fill(tc) for tc in filled}) == 1 and _lum(_fill(filled[0])) > 0.6:
+                for tc in set(cells):
+                    if _fill(tc):
+                        _paint_navy(tc)
+                        n += 1
     return n
 
 
@@ -2292,7 +2445,7 @@ def _sub_headings_between(doc, start_el, end_el, src):
 def _diagram_par(doc, diagram_png):
     from docx.shared import Cm
     import pdf_input as _pi
-    w = min(Cm(16.0), int(_pi.BOX_W_PT * 12700))
+    w = int(_pi.BOX_W_PT * 12700)                     # 구조도 그림도 본문 폭(2026-10-20 사용자: 표·그림 모두 머리말 줄 길이)
     inline = doc.part.new_pic_inline(io.BytesIO(diagram_png), w, None)
     p = etree.Element(qn("w:p"))
     ppr = etree.SubElement(p, qn("w:pPr"))
@@ -2301,6 +2454,45 @@ def _diagram_par(doc, diagram_png):
     r = etree.SubElement(p, qn("w:r"))
     etree.SubElement(r, qn("w:drawing")).append(inline)
     return p
+
+
+def _band_only(p):
+    """글 없는 문단의 그림이 전부 납작한 띠(가로 ≥ 세로×5)인가 — 쪽 위 장식 띠."""
+    exts = [e for e in p.iter("{%s}extent" % NS["wp"])]
+    if not exts:
+        return False
+    for e in exts:
+        try:
+            if int(e.get("cx")) < 5 * int(e.get("cy")):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def drop_empty_sections(doc):
+    """내용이 하나도 없는 구역(빈 문단뿐 — 글·그림·표 없음)을 지운다 = 빈 쪽 없애기.
+    ★원본 구조도 그림만 있던 쪽은 그림을 지우면(회사 구조도로 바꿈) 빈 쪽으로 남았다(안산 8쪽, 2026-10-20).
+    지운 구역 수."""
+    body = doc.element.body
+    n, run = 0, []
+    for el in list(body):
+        if el.tag == qn("w:sectPr"):
+            break
+        is_holder = el.tag == qn("w:p") and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None
+        empty = el.tag == qn("w:p") and not _vis_text(el).strip() and             el.find(".//" + qn("w:drawing")) is None and el.find(".//" + qn("w:pict")) is None and             el.find(".//" + qn("w:object")) is None
+        if is_holder:
+            if empty and run is not None:
+                for x in run + [el]:
+                    body.remove(x)
+                n += 1
+            run = []                                         # 다음 구역 시작
+        elif empty:
+            if run is not None:
+                run.append(el)
+        else:
+            run = None                                       # 이 구역엔 내용이 있다
+    return n
 
 
 def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlight):
@@ -2398,21 +2590,51 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
                 block.append(el)
                 el = el.getnext()
             anchor = bond_last
+            # ★구역 끝 문단(쪽 나눔)도 같이 옮긴다. 예전엔 제자리에 두고 내용만 옮겨, 남은 구역 끝들이 빈 쪽이 됐다
+            #   (안산 14~16쪽 빈 쪽 3장, 2026-10-20). 옮겨 온 자리 앞뒤 쪽 나눔은 원래 있던 앞 구역 끝이 지켜 준다.
             for el in block:
-                if el.tag == qn("w:p") and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
-                    # 구역 끝 문단은 제자리에 두고(쪽 나눔 유지) 내용만 옮긴다
-                    moved = copy.deepcopy(el)
-                    moved.find(qn("w:pPr")).remove(moved.find(f"{qn('w:pPr')}/{qn('w:sectPr')}"))
-                    for ch in [c for c in el if c.tag != qn("w:pPr")]:
-                        el.remove(ch)
-                    el = moved
                 anchor.addnext(el)
                 anchor = el
+
+            def _empty_holder(x):
+                return x is not None and x.tag == qn("w:p") and not _vis_text(x).strip() and \
+                    x.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None and x.find(".//" + qn("w:drawing")) is None
+            # 옮긴 묶음이 구역 끝으로 끝나고 바로 뒤가 개요 쪽 구역 끝이면 그 사이가 빈 쪽 → 뒤의 것을 뺀다
+            #   (사이에 빈 문단이 끼어 있어도 — 안산 8쪽 빈 쪽)
+            if block and _empty_holder(block[-1]):
+                gone, x = [], anchor.getnext()
+                while x is not None and x.tag == qn("w:p") and not _vis_text(x).strip() and \
+                        x.find(".//" + qn("w:drawing")) is None and not _empty_holder(x):
+                    gone.append(x)
+                    x = x.getnext()
+                if _empty_holder(x):
+                    for g in gone + [x]:
+                        g.getparent().remove(g)
             rep["금융 대단원 옮김"] = len(block)
+        # ★개요와 금융 대단원 사이에 대단원 없는 내용(하이라이트 이어지는 쪽 — 신촌 '리스크분석')이 있으면
+        #   개요를 금융 대단원 바로 앞으로 옮긴다 → 1 사모사채 개요 + 2 금융 개요 > 1 금융 구조도 한 쪽(2026-10-20 사용자)
+        if not any(pos(bond_last) < pos(h["el"]) < pos(fin["el"]) for h in heads):
+            el, stuff = bond_last.getnext(), False
+            while el is not None and el is not fin["el"]:
+                if el.tag == qn("w:tbl") or _vis_text(el).strip() or                         (el.find(".//" + qn("w:drawing")) is not None and not _band_only(el)):
+                    stuff = True
+                    break
+                el = el.getnext()
+            if stuff:
+                left = bond_last.getnext()                     # 개요 뒤 빈 구역 끝은 같이 빼야 빈 쪽이 안 생긴다
+                if left is not None and left.tag == qn("w:p") and not _vis_text(left).strip() and                         left.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None and left.find(".//" + qn("w:drawing")) is None:
+                    left.getparent().remove(left)
+                for x in bond_els:
+                    if x.getparent() is not None:
+                        fin["el"].addprevious(x)
+                rep["개요 옮김"] = f"'{fin['title']}' 바로 앞으로"
+                bpos = pos(bond_head)
         # ★개요 표 바로 밑에 이어서 '금융 개요'(새 쪽 X, 2026-10-15 사용자 3번) — 사이의 빈 문단·구역 나눔을 걷어낸다
         between, el, ok = [], bond_last.getnext(), True
         while el is not None and el is not fin["el"]:
-            if el.tag != qn("w:p") or _vis_text(el).strip() or el.find(".//" + qn("w:drawing")) is not None:
+            # ★쪽 맨 위 납작한 띠 그림(돈암 각 쪽 위 무늬 띠, 가로:세로 5 이상)만 있는 문단은 '쪽 장식' → 같이 걷어낸다
+            #   (안 그러면 그림 문단이라 멈춰서 1·2 대단원이 다른 쪽으로 갈라졌다, 2026-10-20)
+            if el.tag != qn("w:p") or _vis_text(el).strip() or                     (el.find(".//" + qn("w:drawing")) is not None and not _band_only(el)):
                 ok = False
                 break
             between.append(el)
@@ -2429,7 +2651,7 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
                     ppr.remove(e)
             gap = etree.Element(qn("w:p"))                     # 위 표와 조금 띄움
             etree.SubElement(etree.SubElement(gap, qn("w:pPr")), qn("w:spacing"),
-                             {qn("w:before"): "240", qn("w:after"): "0"})
+                             {qn("w:before"): "120", qn("w:after"): "0"})
             fin["el"].addprevious(gap)
             rep["금융 개요 이어서"] = len(between)
     fin["title"] = "금융 개요"
@@ -2460,6 +2682,21 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
     for k, (p, kind, m) in enumerate(rest):
         _set_heading_text(p, m.end(3), m.group(1) + _fmt_num(kind, m.group(2), k + 3) + m.group(3), m.group(4).strip())
     rep["금융 소제목"] = 2 + len(rest)
+    # ★개요 ~ 금융 구조도 그림까지 한 덩어리로(다음과 같이 두기) — 하이라이트 밑에 붙을 때 자리가 모자라면
+    #   '2 금융 개요' 제목만 쪽 끝에 남고 그림이 다음 쪽으로 갔다(대전, 2026-10-20) → 통째로 다음 쪽으로 넘어가게
+    if diagram_png and fin["el"].getparent() is body and bond_head.getparent() is body:
+        el = bond_head
+        while el is not None and el is not last:
+            for pp in ([el] if el.tag == qn("w:p") else list(el.iter(qn("w:p")))):
+                ppr = pp.find(qn("w:pPr"))
+                if ppr is None:
+                    ppr = etree.SubElement(pp, qn("w:pPr"))
+                    pp.insert(0, ppr)
+                if ppr.find(qn("w:keepNext")) is None:
+                    kn = etree.Element(qn("w:keepNext"))
+                    st = ppr.find(qn("w:pStyle"))
+                    (st.addnext(kn) if st is not None else ppr.insert(0, kn))
+            el = el.getnext()
     # 대단원 번호 다시 매김
     v = 0
     for h in _major_headings(doc):
@@ -2529,6 +2766,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     _place_bond(doc, tpl, bond_els, bond_place)
     bond_head = head if head is not None else bond_els[-len(tpl_bond or [None]) - 1]
     rep.update(restructure_sections(doc, bond_els, bond_head, sub, diagram_png, bond_place is not None))
+    rep["빈 쪽 지움"] = drop_empty_sections(doc)
     rep["개요 자리"] = ("표지 다음 쪽" if bond_place is None else
                       f"하이라이트 뒤 {'같은 쪽에 이어서' if bond_place[1] else '새 쪽'}")
 
@@ -2593,6 +2831,10 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
         st.remove(eo)
 
     apply_company_geometry(doc)
+    rep["줄 간격 1 미만 → 고정 간격"] = fix_compressed_line_spacing(doc)
+    rep["구분 칸 네이비"] = paint_label_columns(doc)
+    rep["고정 줄 높이 풀기"] = loosen_exact_rows(doc)
+    rep["표지 상자 맞춤"] = fit_cover_boxes(doc)
     rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)
 
