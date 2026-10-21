@@ -117,6 +117,8 @@ def find_highlight_pages(pdf_bytes):
 
 
 BOND_NEED_PT = 270    # 사모사채 개요(제목 + 9줄 표)에 드는 높이 어림(약 9.5cm)
+FIN_HEAD_PT = 75      # 금융 개요 대단원 제목 + '1. 금융 구조도' 소제목 + 사이 띄움
+FIT_FLOOR = 0.30      # 쪽 줄이기 최저 비율 — 9pt 고정 글만으로도 안 들어가는 빽빽한 표 쪽(내곡 분양가 테이블)만 여기까지 내려간다
 
 
 _TOC_RE = re.compile(r"(목\s*차|차\s*례|contents|table\s*of\s*contents|index)", re.I)
@@ -144,18 +146,26 @@ def find_toc_pages(doc):
     return out
 
 
-def bond_place(rep, highlight_pages):
+def bond_place(rep, highlight_pages, diagram_png=None):
     """사모사채 개요 자리 — 하이라이트 마지막 쪽 뒤(2026-10-08 사용자 확정).
 
     그 쪽에 개요가 들어갈 여백이 남으면 (k, True) = 이어서, 아니면 (k, False) = 새 쪽.
+    ★개요 + 금융 개요 > 1. 금융 구조도(그림)는 한 쪽에 같이 있어야 한다(2026-10-21) → 구조도가 있으면 그 높이(본문 폭 기준)까지 넣어 잰다.
     하이라이트를 못 찾았으면 None = 표지 바로 다음 쪽.
     """
     if not highlight_pages:
         return None
+    need = BOND_NEED_PT
+    if diagram_png:
+        try:
+            pix = fitz.Pixmap(diagram_png)
+            need += FIN_HEAD_PT + BOX_W_PT * pix.height / max(pix.width, 1) + 12
+        except Exception:
+            need += FIN_HEAD_PT + 300
     last = max(highlight_pages)
     for k, p in enumerate(rep.get("쪽", [])):
         if p["원본쪽"] == last:
-            return (k, BOX_H_PT - p["높이"] >= BOND_NEED_PT)
+            return (k, BOX_H_PT - p["높이"] >= need)
     return None
 
 
@@ -3119,13 +3129,13 @@ def stretch_table_to_width(tbl, target_tw):
 
 
 def page_text_lines(page):
-    """쪽 글 줄 [(가장 큰 글자 크기, 줄 높이)] — 9pt 규칙으로 커질 몫 어림용."""
+    """쪽 글 줄 [(가장 큰 글자 크기, 줄 높이, 줄 가운데 y)] — 9pt 규칙으로 커질 몫 어림용."""
     out = []
     for b in page.get_text("dict")["blocks"]:
         for l in b.get("lines", []):
             sz = [sp["size"] for sp in l["spans"] if sp["text"].strip()]
             if sz:
-                out.append((max(sz), l["bbox"][3] - l["bbox"][1]))
+                out.append((max(sz), l["bbox"][3] - l["bbox"][1], (l["bbox"][1] + l["bbox"][3]) / 2))
     return out
 
 
@@ -3153,24 +3163,36 @@ def _fit_page(secs, grps, box, lines=None):
         H = box.height + grow
 
         def need(x):
-            extra = 0.0
-            for sz, h in lines:
+            # ★같은 높이에 나란히 있는 줄(표 칸 여러 개)은 한 번만 — 다 더했더니 이천 3쪽이 '글 높이 1,897pt' 로 잡혀
+            #   쪽마다 0.30(최저)까지 줄여 그림이 원본의 1/3 로 쪼그라들었다(2026-10-21 사용자 '사진을 왜 이렇게 작게').
+            band = {}
+            for item in lines:
+                sz, h = item[0], item[1]
+                yc = item[2] if len(item) > 2 else len(band)
                 v = sz * x
-                # ★_sz_target 은 '원본' 8~10.5pt 글을 줄인 비율과 상관없이 9pt 로 둔다 → 조건도 원본 크기로.
-                #   예전엔 줄인 크기가 8~9pt 인 것만 셌다 → 원본 8pt 를 0.86 배 한 6.9pt 가 9pt 로 커지는 몫이 빠져
-                #   표 마지막 줄이 넘쳤다(내곡 33·44쪽, 2026-10-20)
+                # ★_sz_target 은 '원본' 8~10.5pt 글을 줄인 비율과 상관없이 9pt 로 둔다 → 조건도 원본 크기로(내곡 33·44쪽, 2026-10-20)
                 if 8 <= sz <= 10.5 and v < MIN_SZ / 2:
-                    extra += h * ((MIN_SZ / 2 / v) ** 1.5 - 1)
-            return x * (H + extra)
-        lo, hi = 0.3, s
-        if need(hi) > BOX_H_PT * HEIGHT_SAFETY:
-            for _ in range(25):
-                mid = (lo + hi) / 2
-                if need(mid) <= BOX_H_PT * HEIGHT_SAFETY:
-                    lo = mid
-                else:
-                    hi = mid
-            s = lo
+                    # 9pt 로 고정되는 줄의 결과 높이 = h·(9/sz)^1.5(줄바꿈 늘어남 포함) — 쪽을 얼마나 줄이든 그대로다.
+                    # ★예전 식 h·(9/(sz·x))^1.5 는 x 가 작을수록 커져(×x^-0.5) 많이 줄인 쪽일수록 부풀려 셌다
+                    #   → 아래 x·(H+extra) 에 넣으려고 x 로 나눠 둔다
+                    e = h * ((MIN_SZ / 2 / sz) ** 1.5 / x - 1)
+                    k_ = round(yc / 3)
+                    band[k_] = max(band.get(k_, 0.0), e)
+            return x * (H + sum(band.values()))
+        target = BOX_H_PT * HEIGHT_SAFETY
+        lo, hi = FIT_FLOOR, s
+        if need(hi) > target:
+            if need(lo) > target:
+                # 9pt 로 고정되는 글만으로도 안 들어가는 쪽 — 더 줄여도 글은 안 줄고 그림·표만 쪼그라든다 → 가장 작게 드는 비율로
+                s = min((need(lo + i * (hi - lo) / 40), lo + i * (hi - lo) / 40) for i in range(41))[1]
+            else:
+                for _ in range(25):
+                    mid = (lo + hi) / 2
+                    if need(mid) <= target:
+                        lo = mid
+                    else:
+                        hi = mid
+                s = lo
         used = need(s)
     for i, sec in enumerate(secs):
         _set_geometry(sec, new_page=(i == 0))

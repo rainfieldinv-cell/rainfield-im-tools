@@ -2095,6 +2095,30 @@ def straighten_alignment(doc):
         snap(lefts([p for p in tc if p.tag == qn("w:p")]))
     for bx in body.iter(qn("w:txbxContent")):
         snap(lefts([p for p in bx if p.tag == qn("w:p")]))
+    # ③ '가운데' 로 잡힌 꽉 찬 줄 → 양쪽 맞춤(pdf2docx 가 줄 끝까지 찬 첫 줄을 가운데 정렬로 봄 — 등촌 ES 상자 첫 줄만
+    #    가운데로 밀려 시작점이 달랐다). 꽉 찬 줄은 가운데든 양쪽이든 보기엔 같아 진짜 가운데 글도 안 망가진다.
+    for p in body.iter(qn("w:p")):
+        jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+        if jc is None or jc.get(qn("w:val")) != "center" or p.find(".//" + qn("w:drawing")) is not None:
+            continue
+        tc = next((a for a in p.iterancestors() if a.tag in (qn("w:tc"), qn("w:txbxContent"))), None)
+        if tc is not None and tc.tag == qn("w:tc"):
+            w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+            try:
+                avail = int(w.get(qn("w:w"))) / 20 - 10
+            except (TypeError, ValueError, AttributeError):
+                continue
+        elif tc is None:
+            avail = _pi.BOX_W_PT
+        else:
+            continue
+        l, fl, hg = _pi._ind_vals(p)
+        avail -= max(l + fl - hg, 0) / 20
+        used = sum(_pi._run_w_pt(r) for r in p.iter(qn("w:r")))
+        if avail > 60 and used >= 0.85 * avail and not any(b.get(qn("w:type")) in (None, "textWrapping")
+                                                            for b in p.iter(qn("w:br"))):
+            jc.set(qn("w:val"), "both")
+            n += 1
     # ② 숫자 열 → 오른쪽 맞춤
     for tbl in body.iter(qn("w:tbl")):
         cols = {}
@@ -2122,6 +2146,30 @@ def straighten_alignment(doc):
                     after.addprevious(jc) if after is not None else ppr.append(jc)
                 jc.set(qn("w:val"), "right")
                 n += 1
+    return n
+
+
+def flatten_empty_cells(doc):
+    """글 없는 칸의 빈 문단은 줄 높이를 거의 0 으로 — 칸 높이를 밀어 올리지 않게.
+    ★빈 문단에 간격이 안 적혀 있으면 스타일 기본값(뒤 간격 + 1.5배 줄)이 들어가 그 줄 전체가 원본의 두 배로 커졌다
+      (내곡 Deal Highlight '주요 금융조건' 비고 열 → 쪽 끝 각주가 다음 쪽으로, 2026-10-21). 줄 높이는 다른 칸·줄 높이 값이 정한다."""
+    n = 0
+    for tc in doc.element.body.iter(qn("w:tc")):
+        ps = [p for p in tc if p.tag == qn("w:p")]
+        if not ps or tc.find(qn("w:tbl")) is not None or any(_vis_text(p).strip() for p in ps) or \
+                any(p.find(".//" + qn("w:drawing")) is not None or p.find(".//" + qn("w:pict")) is not None for p in ps):
+            continue
+        for p in ps:
+            ppr = _first_child(p, "pPr")
+            sp = ppr.find(qn("w:spacing"))
+            if sp is None:
+                sp = ppr.makeelement(qn("w:spacing"), {})
+                _put(ppr, sp)
+            sp.set(qn("w:before"), "0")
+            sp.set(qn("w:after"), "0")
+            sp.set(qn("w:line"), "20")
+            sp.set(qn("w:lineRule"), "exact")
+            n += 1
     return n
 
 
@@ -2155,19 +2203,8 @@ def paint_label_columns(doc):
                 line += [tc] * k
             grid.append(line)
         ncol = max(len(r) for r in grid)
-        # ★맨 윗줄 첫 칸이 '구분' 인 표 = 첫 열이 항목(구분) 칸 → 열 전체 네이비(2026-10-21 사용자: 표 안의 표까지 모든 표
-        #   '구분·머리글 = 네이비'. 이천 금융조건 차주·PM사…, 안쪽 일정표 납입율·납입주체 — 원본은 흰 바탕 굵은 글씨였다)
-        if grid and grid[0] and re.sub(r"\s", "", _vis_text(grid[0][0])) == "구분":
-            for r in grid[1:]:
-                tc = r[0] if r else None
-                if tc is None or tc is grid[0][0] or len(r) and r.count(tc) >= ncol or \
-                        tc.find(".//" + qn("w:tbl")) is not None:
-                    continue                               # 한 줄 전체를 덮은 칸·안에 표가 든 칸은 아님
-                f = _fill(tc)
-                if f == NAVY or (f and not (_grayish(f) or _navy_like(f))):
-                    continue                               # 이미 네이비·강조색 칸은 그대로
-                _paint_navy(tc)
-                n += 1
+        # (2026-10-21 '구분' 첫 열 전체 칠하기는 뺐다 — 사용자: 원본에서 흰 첫 열('사업진행현황'·'입지도')까지 칠하면 안 됨.
+        #   네이비는 머리글 줄 + 원본에서 색이 칠해진 항목 칸(아래 규칙)만, 나머지는 원본 그대로)
         body_rows = [r for r in grid if not all(_fill(tc) == NAVY for tc in r if tc is not None)]
         if len(body_rows) < 2:
             continue
@@ -2825,9 +2862,9 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
             if ppr is not None:
                 for e in ppr.findall(qn("w:pageBreakBefore")):
                     ppr.remove(e)
-            gap = etree.Element(qn("w:p"))                     # 위 표와 조금 띄움
+            gap = etree.Element(qn("w:p"))                     # 위 표와 띄움 — 2026-10-21 사용자 '너무 가깝다, 한 칸 더' → 120 → 400
             etree.SubElement(etree.SubElement(gap, qn("w:pPr")), qn("w:spacing"),
-                             {qn("w:before"): "120", qn("w:after"): "0"})
+                             {qn("w:before"): "400", qn("w:after"): "0"})
             fin["el"].addprevious(gap)
             rep["금융 개요 이어서"] = len(between)
     fin["title"] = "금융 개요"
@@ -2858,21 +2895,9 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
     for k, (p, kind, m) in enumerate(rest):
         _set_heading_text(p, m.end(3), m.group(1) + _fmt_num(kind, m.group(2), k + 3) + m.group(3), m.group(4).strip())
     rep["금융 소제목"] = 2 + len(rest)
-    # ★개요 ~ 금융 구조도 그림까지 한 덩어리로(다음과 같이 두기) — 하이라이트 밑에 붙을 때 자리가 모자라면
-    #   '2 금융 개요' 제목만 쪽 끝에 남고 그림이 다음 쪽으로 갔다(대전, 2026-10-20) → 통째로 다음 쪽으로 넘어가게
-    if diagram_png and fin["el"].getparent() is body and bond_head.getparent() is body:
-        el = bond_head
-        while el is not None and el is not last:
-            for pp in ([el] if el.tag == qn("w:p") else list(el.iter(qn("w:p")))):
-                ppr = pp.find(qn("w:pPr"))
-                if ppr is None:
-                    ppr = etree.SubElement(pp, qn("w:pPr"))
-                    pp.insert(0, ppr)
-                if ppr.find(qn("w:keepNext")) is None:
-                    kn = etree.Element(qn("w:keepNext"))
-                    st = ppr.find(qn("w:pStyle"))
-                    (st.addnext(kn) if st is not None else ppr.insert(0, kn))
-            el = el.getnext()
+    # (2026-10-21) '다음과 같이 두기'·'앞에서 쪽 나누기' 는 쓰지 않는다 — 워드 편집 기호 보기에서 문단 앞에 ■ 표시가 떠
+    #   사용자가 '글머리 같은 게 왜 있냐'. 개요가 하이라이트 쪽에 붙을지는 bond_place 가 구조도 높이까지 넣어 정하고,
+    #   금융조건 앞 쪽 나눔은 '구역 나누기' 로.
     # ★한 쪽 = 사모사채 개요 + 금융 개요 > 1. 금융 구조도 '만'. 그 뒤(2. 본건 기초자산 금융조건 ~)는 늘 다음 쪽에서
     #   (2026-10-21 사용자: 이천에서 2번 표가 같은 쪽에 붙어 나옴)
     if last is not None and last.getparent() is body:
@@ -2882,22 +2907,26 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
             nx = nx.getnext()
         if nx is not None and nx.tag != qn("w:sectPr") and \
                 not (nx.tag == qn("w:p") and nx.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None):
-            if nx.tag != qn("w:p"):                         # 표면 앞에 '쪽 나눔 문단'(1pt)을 둔다
-                brk = etree.Element(qn("w:p"))
-                bppr = etree.SubElement(brk, qn("w:pPr"))
-                etree.SubElement(bppr, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0",
-                                                         qn("w:line"): "20", qn("w:lineRule"): "exact"})
-                nx.addprevious(brk)
-                nx = brk
-            ppr = nx.find(qn("w:pPr"))
-            if ppr is None:
-                ppr = etree.Element(qn("w:pPr"))
-                nx.insert(0, ppr)
-            if ppr.find(qn("w:pageBreakBefore")) is None:
-                pb = etree.Element(qn("w:pageBreakBefore"))
-                anchor_ = next((ppr.find(qn(t)) for t in ("w:keepLines", "w:keepNext", "w:pStyle")
-                                if ppr.find(qn(t)) is not None), None)
-                (anchor_.addnext(pb) if anchor_ is not None else ppr.insert(0, pb))
+            # 구역 나누기(새 쪽): nx 가 든 구역의 끝 표시를 복사해 nx 바로 앞에 '구역 끝 문단'(1pt)을 두고,
+            #   원래 구역 끝(이제 nx 쪽 구역)은 새 쪽에서 시작하게
+            hold = nx
+            while hold is not None and not (hold.tag == qn("w:sectPr") or (hold.tag == qn("w:p") and
+                                            hold.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None)):
+                hold = hold.getnext()
+            if hold is not None:
+                sp_old = hold if hold.tag == qn("w:sectPr") else hold.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+                # 구역 끝 표시는 nx 바로 앞 문단(대개 구조도 그림 문단)에 단다.
+                # ★처음엔 1pt '고정' 줄의 빈 문단을 새로 넣었더니 워드가 바로 앞 그림 줄까지 1pt 로 눌러 구조도가 실선 한 줄로 보였다
+                prev = nx.getprevious()
+                if prev is not None and prev.tag == qn("w:p") and prev.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None:
+                    _first_child(prev, "pPr").append(copy.deepcopy(sp_old))
+                else:
+                    brk = etree.Element(qn("w:p"))
+                    etree.SubElement(brk, qn("w:pPr")).append(copy.deepcopy(sp_old))
+                    nx.addprevious(brk)
+                ty_ = sp_old.find(qn("w:type"))
+                if ty_ is not None:
+                    sp_old.remove(ty_)                      # 기본 = 새 쪽
             rep["금융조건 다음 쪽"] = True
             # 새 쪽으로 넘긴 부분이 짧고 바로 원본 쪽 나눔이 오면(대전: 금융조건 표 첫 두 줄만 있고 나머지는 원본 다음 쪽)
             # 그 쪽이 거의 빈 채로 남았다 → 다음 원본 쪽을 '이어서'(continuous) 시작하게
@@ -3067,6 +3096,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep["구분 칸 네이비"] = paint_label_columns(doc)
     rep["고정 줄 높이 풀기"] = loosen_exact_rows(doc)
     rep["정렬 똑바로"] = straighten_alignment(doc)
+    rep["빈 칸 높이 0"] = flatten_empty_cells(doc)
     rep["표지 상자 맞춤"] = fit_cover_boxes(doc)
     rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)

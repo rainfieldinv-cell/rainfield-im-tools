@@ -575,7 +575,7 @@ elif step == 5:
                         if not _diag_png:
                             SS["cf_diag_err"] = _derr or "그림으로 바꾸지 못했습니다"
                 _prog(0.98, "표지·사모사채 개요·금융 구조도·연락처 넣는 중…")
-                place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [])   # 개요는 원본 하이라이트 뒤
+                place = pdf_input.bond_place(rep1, SS.get("cf_highlight") or [], _diag_png)   # 개요는 원본 하이라이트 뒤(구조도까지 들어가면 같은 쪽)
                 out, rep2 = engine.build(body, title_lines=[SS.get("cf_title1", ""), SS.get("cf_title2", "")],
                                          header_text=SS.get("cf_header", ""), date_text=SS.get("cf_date", ""),
                                          photo=photo, bond=bond, bond_place=place,
