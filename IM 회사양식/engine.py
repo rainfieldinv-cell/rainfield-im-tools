@@ -1131,18 +1131,15 @@ def _fit_cover_photo(blip_node, pw, ph):
 
 
 def _text_width_pt(text, size_pt, bold=True):
-    """Pretendard 로 찍었을 때 글 폭(pt) 어림 — 웹에는 글꼴 파일이 없어 글자 종류별 평균 폭으로 잰다."""
-    w = 0.0
-    for ch in text:
-        if ord(ch) >= 0x1100:                 # 한글·한자
-            w += 0.92
-        elif ch == " ":
-            w += 0.28
-        elif ch.isupper() or ch.isdigit():
-            w += 0.64
-        else:
-            w += 0.55
-    return w * size_pt * (1.04 if bold else 1.0)
+    """Pretendard 로 찍었을 때 글 폭(pt) — 글꼴 파일에서 잰 글자 폭 표(양식\\pretendard_widths.json, 웹에도 있음).
+    ★예전엔 한글 0.92 평균으로 어림 → 실제(ExtraBold 0.864)보다 넓게 세 한 줄짜리 제목을 두 줄로 보고 상자를 늘려
+      날짜가 한 줄만큼 멀리 떨어졌다(이천 표지, 2026-10-21 사용자)."""
+    import pdf_input as _pi
+    tbl = _pi._widths()["bold" if bold else "light"]
+    return sum(_pi._char_w(ch, tbl) for ch in text) * size_pt
+
+
+STRICTLY_X, STRICTLY_Y = 157480, 133350   # 'Strictly Confidential' 상자 — 종이 왼쪽·위에서 EMU(12.4pt·10.5pt)
 
 
 def fit_cover_boxes(doc):
@@ -1178,11 +1175,15 @@ def fit_cover_boxes(doc):
                 for x in a.iter("{%s}ext" % NS["a"]):
                     if etree.QName(x.getparent()).localname == "xfrm":
                         x.set("cx", ext.get("cx"))
-                if ph is not None:
-                    ph.set("relativeFrom", "margin")
-                    for ch in list(ph):
-                        ph.remove(ch)
-                    etree.SubElement(ph, "{%s}posOffset" % NS["wp"]).text = "0"
+                # ★자리(2026-10-21 사용자가 직접 옮긴 것 실측): 종이 왼쪽 위 모서리 가까이 — 왼쪽 12.4pt·위 10.5pt
+                #   (예전 = 본문 왼쪽 끝·위 27pt 는 너무 안쪽이라 함)
+                pv = a.find("wp:positionV", NS)
+                for p_, off in ((ph, STRICTLY_X), (pv, STRICTLY_Y)):
+                    if p_ is not None:
+                        p_.set("relativeFrom", "page")
+                        for ch in list(p_):
+                            p_.remove(ch)
+                        etree.SubElement(p_, "{%s}posOffset" % NS["wp"]).text = str(off)
                 n += 1
             elif "Disclaimer" in t:
                 ext.set("cx", str(body_w))
@@ -1236,6 +1237,17 @@ def _layout_cover(els, lines):
         im_y = int(_pos_v(im).text)
         logo_h = int(logo.find("wp:extent", NS).get("cy"))
         _pos_v(logo).text = str(max(0, im_y - logo_h - 40000))
+        # ★로고 왼쪽 끝 = 글 시작점(2026-10-21 사용자). 글상자 글은 상자 안쪽 여백(lIns)만큼 들어가 있어
+        #   로고(그림)가 글보다 그만큼 왼쪽에 튀어나와 보였다 → 로고를 그 여백만큼 오른쪽으로.
+        bp = im.find(".//{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}bodyPr")
+        ins = int(bp.get("lIns", 91440)) if bp is not None else 91440
+        ph = logo.find("wp:positionH", NS)
+        im_ph = im.find("wp:positionH", NS)
+        if ph is not None and im_ph is not None and im_ph.find("wp:posOffset", NS) is not None:
+            ph.set("relativeFrom", im_ph.get("relativeFrom"))
+            for ch in list(ph):
+                ph.remove(ch)
+            etree.SubElement(ph, "{%s}posOffset" % NS["wp"]).text = str(int(im_ph.find("wp:posOffset", NS).text) + ins)
     ext = title.find("wp:extent", NS)
     body_pr = title.find(".//{http://schemas.microsoft.com/office/word/2010/wordprocessingShape}bodyPr")
     l_ins = int(body_pr.get("lIns", 91440)) if body_pr is not None else 91440
