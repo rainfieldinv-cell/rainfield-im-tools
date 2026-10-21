@@ -108,6 +108,55 @@ def _spans(page, clip):
     return out
 
 
+def _take_underlines(lines, text_lines, box):
+    """글 바로 밑에 그은 짧은 가로선 = 글 밑줄(칸 나눔 선이 아니다). 그 선은 빼고 그 글자들에 밑줄 표시('u').
+    ★이천 금융조건 '중도금대출 기표 완료'·'예정' 밑줄을 칸 나눔 선으로 읽어 줄이 둘로 쪼개져
+      글이 위로 붙고 옆 칸 글과 높이가 어긋났다(2026-10-21 사용자 '정렬이 이상해').
+    선이 글 줄 아래 끝 바로 밑(−2~+4pt)에 있고, 그 줄 글자 범위 안(±4pt)에 들어가며 글자가 실제로 위에 있을 때만.
+    돌려줌: 남길 선 목록."""
+    keep = []
+    for ln in lines:
+        r = ln[0]
+        if r.width < r.height * 3 or r.width < 6 or not (box + (-2, -2, 2, 2)).intersects(r):
+            keep.append(ln)
+            continue
+        y = (r.y0 + r.y1) / 2
+        hit = None
+        for lb, sp in text_lines:
+            if not (lb.y1 - 2 <= y <= lb.y1 + 4):
+                continue
+            chars = [(s, i, cb) for s in sp for i, (ch, cb) in enumerate(s.get("chars") or []) if ch.strip()]
+            over = [(s, i) for s, i, cb in chars if r.x0 - 1 <= (cb.x0 + cb.x1) / 2 <= r.x1 + 1]
+            if not over:
+                continue
+            xs = [cb for s, i, cb in chars if r.x0 - 1 <= (cb.x0 + cb.x1) / 2 <= r.x1 + 1]
+            if min(c.x0 for c in xs) - 4 <= r.x0 and r.x1 <= max(c.x1 for c in xs) + 4:
+                hit = over
+                break
+        if hit is None:
+            keep.append(ln)
+            continue
+        for s, i in hit:
+            s.setdefault("u_idx", set()).add(i)
+    for _, sp in text_lines:                                   # 밑줄 글자만 따로 조각으로(일부만 밑줄인 줄)
+        new = []
+        for s in sp:
+            u = s.pop("u_idx", None)
+            if not u:
+                new.append(s)
+                continue
+            cur = None
+            for i, (ch, cb) in enumerate(s["chars"]):
+                flag = i in u or (not ch.strip() and cur is not None and cur["u"] and any(j > i for j in u))
+                if cur is None or cur["u"] != flag:
+                    cur = dict(s, text="", chars=[], u=flag)
+                    new.append(cur)
+                cur["text"] += ch
+                cur["chars"].append((ch, cb))
+        sp[:] = new
+    return keep
+
+
 def _pieces(text_lines, keyf):
     """글 줄을 글자 자리마다 keyf(점)→칸 열쇠로 나눈다. [(열쇠, bbox, [span…])]
     ★한 줄로 읽힌 머리글 '공급면적 실거래가 공급평당 …' 이 칸 하나에 몰렸다(내곡동 31쪽)."""
@@ -251,6 +300,8 @@ def _run(text, s):
     sz = str(max(2, int(round(s["size"] * 2))))
     etree.SubElement(rpr, qn("w:sz"), {qn("w:val"): sz})
     etree.SubElement(rpr, qn("w:szCs"), {qn("w:val"): sz})
+    if s.get("u"):                                             # 원본 밑줄(가로선으로 그린 것) — _take_underlines (u 는 szCs 뒤)
+        etree.SubElement(rpr, qn("w:u"), {qn("w:val"): "single"})
     t = etree.SubElement(r, qn("w:t"))
     t.text = text
     t.set(XML_SPACE, "preserve")
@@ -1035,8 +1086,9 @@ def rebuild_page(page, groups, part=None):
         if not cands:
             _dbg("후보 없음", ti, src_all[:80], [_all_text(t)[:40] for t in tops])
             continue
+        t_lines = _take_underlines(lines, text_lines, tb)
         try:
-            new = _build(page, _segs(lines, fills, tb), tb, lines, fills, text_lines,
+            new = _build(page, _segs(t_lines, fills, tb), tb, t_lines, fills, text_lines,
                          old_pr=cands[0].find(qn("w:tblPr")), pics=pics, part=part)
         except _Abort as e:
             _dbg("중단", ti, e)

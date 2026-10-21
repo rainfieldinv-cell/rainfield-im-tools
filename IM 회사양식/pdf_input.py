@@ -956,6 +956,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
     rep["글머리 내어쓰기"] = hang_bullets(d, width_ratio)
     rep["표에서 온 글머리 위치 맞춤"] = align_table_bullets(d)
     rep["글머리 다음 줄 맞춤"] = align_continuations(d)
+    rep["줄바꿈 탭·쪼개진 줄·줄 간격 정리"] = normalize_text_flow(d)
     rep["칸 좌우 여백 같게"] = even_cell_margins(d)
     rep["선만 있는 표 지움"] = drop_grid_tables(d)
     rep["칸 안 작은 표 풂"] = unwrap_cell_boxes(d)
@@ -1656,6 +1657,283 @@ def split_bullet_lines(d):
             p.addnext(newp)
             runs = runs[:i]
             n += 1
+    return n
+
+
+_NUM_START_RE = re.compile(r"^\s*(\(?\d{1,2}[.)]|\(?[가-하][.)]|[①-⑳]|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ]|※|\*|\[|<|【|■|□|▶|▷)")
+
+
+def _run_w_pt(r):
+    """글 조각 폭(pt) — Pretendard 글자 폭 표 + 글자 간격(w:spacing). 원본 글자 폭에 맞춘 뒤라 원본 폭과 거의 같다."""
+    from docx.oxml.ns import qn
+    rpr = r.find(qn("w:rPr"))
+    sz = rpr.find(qn("w:sz")) if rpr is not None else None
+    size = int(sz.get(qn("w:val"))) / 2 if sz is not None and (sz.get(qn("w:val")) or "").isdigit() else 10.0
+    b = rpr.find(qn("w:b")) if rpr is not None else None
+    tbl = _widths()["bold" if b is not None and b.get(qn("w:val")) not in ("0", "false") else "light"]
+    spc = rpr.find(qn("w:spacing")) if rpr is not None else None
+    extra = int(spc.get(qn("w:val"))) / 20 if spc is not None and (spc.get(qn("w:val")) or "").lstrip("-").isdigit() else 0.0
+    txt = "".join(t.text or "" for t in r.findall(qn("w:t")))
+    return sum(_char_w(ch, tbl) * size + extra for ch in txt)
+
+
+def _par_size(p):
+    from docx.oxml.ns import qn
+    v = [int(x.get(qn("w:val"))) / 2 for x in p.iter(qn("w:sz")) if (x.get(qn("w:val")) or "").isdigit()
+         and x.getparent().tag == qn("w:rPr") and x.getparent().getparent().find(qn("w:t")) is not None]
+    return max(v) if v else 10.0
+
+
+def _line_h(p):
+    """(앞 간격 pt, 한 줄 높이 pt, 줄 규칙, line 값) — match_line_spacing 뒤라 '배수' 는 Pretendard 기준."""
+    from docx.oxml.ns import qn
+    sp = p.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+
+    def g(a):
+        v = sp.get(qn("w:" + a)) if sp is not None else None
+        try:
+            return int(float(v)) if v is not None else None
+        except ValueError:
+            return None
+    before = (g("before") or 0) / 20
+    line, rule = g("line"), (sp.get(qn("w:lineRule")) if sp is not None else None) or "auto"
+    size = _par_size(p)
+    if not line:
+        return before, size * LINE_EM, rule, line
+    if rule == "auto":
+        return before, line / 240 * LINE_EM * size, rule, line
+    return before, line / 20, rule, line
+
+
+def _set_pitch(p, before_pt, pitch_pt):
+    """줄 간격 = '최소' pitch_pt(원본 줄 사이 거리), 앞 간격 = before_pt. '최소' 라 글자가 커져도 잘리지 않는다."""
+    from docx.oxml.ns import qn
+    ppr = p.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = p.makeelement(qn("w:pPr"), {})
+        p.insert(0, ppr)
+    sp = ppr.find(qn("w:spacing"))
+    if sp is None:
+        sp = ppr.makeelement(qn("w:spacing"), {})
+        after = next((ppr.find(qn(t)) for t in ("w:ind", "w:jc", "w:rPr", "w:sectPr") if ppr.find(qn(t)) is not None), None)
+        after.addprevious(sp) if after is not None else ppr.append(sp)
+    sp.set(qn("w:before"), str(max(0, int(round(before_pt * 20)))))
+    sp.set(qn("w:line"), str(max(20, int(round(pitch_pt * 20)))))
+    sp.set(qn("w:lineRule"), "atLeast")
+
+
+def _set_jc(p, val):
+    from docx.oxml.ns import qn
+    ppr = p.find(qn("w:pPr"))
+    if ppr is None:
+        return
+    jc = ppr.find(qn("w:jc"))
+    if jc is None:
+        jc = ppr.makeelement(qn("w:jc"), {})
+        after = next((ppr.find(qn(t)) for t in ("w:rPr", "w:sectPr") if ppr.find(qn(t)) is not None), None)
+        after.addprevious(jc) if after is not None else ppr.append(jc)
+    jc.set(qn("w:val"), val)
+
+
+def normalize_text_flow(d):
+    """표 밖 본문 글을 '원본 줄 모양 흉내' 에서 '이어지는 글' 로 — 우리 양식 폭에서 워드가 자연스럽게 줄을 바꾸게.
+    ★2026-10-21 사용자(이천 Executive summary): ① 3줄 문단 첫 줄만 시작점이 다름 ② 글머리 줄 간격이 들쭉날쭉
+      ③ '…이며, 해당        대출 실행시' 처럼 크게 벌어짐(군데군데 많음).
+    원인: pdf2docx 가 원본 줄마다 ⓐ 따로 문단을 만들고(꽉 찬 첫 줄은 '가운데 정렬' 로 잘못 봄) ⓑ 줄 바뀐 자리에 탭을 넣고
+      ⓒ 줄 간격을 '앞 간격+줄 높이' 로 흉내 냄 → 양식 폭(516pt)이 원본(503pt)과 다르고 글꼴도 달라 줄 바뀌는 자리가 달라지면 다 어긋났다.
+      (원본과 같은 폭으로 해도 글꼴이 바뀌면 줄 바뀌는 자리가 달라져 해결 안 됨 → 글을 이어 붙이는 게 근본.)
+    ① 줄 바뀐 자리 탭 지움: 탭 앞 글이 거의 한 줄(줄 폭 70% 이상)이고 뒤에 글이 있을 때만(목차·칸 맞춤 탭은 앞 글이 짧아 안 건드림 —
+       예전 '모든 탭 → 띄어쓰기' 는 내곡 목차를 망가뜨렸다).
+    ② 쪼개진 줄 합치기: 윗줄이 거의 꽉 찼고(80% 이상) 아랫줄이 글머리·번호로 시작하지 않으며 크기·굵기·간격·시작점이 같을 때.
+       원본 줄 끝 띄어쓰기는 pdf2docx 가 남겨 둔다(어절 중간 줄바꿈 '조합|원' 은 띄어쓰기 없음) → 그대로 붙인다. 합친 문단은 양쪽 맞춤.
+    ③ 줄 간격 같게: 합친 문단·이어지는 글머리 묶음은 모든 줄이 원본 줄 사이 거리(앞 간격+줄 높이)로 — 첫 줄 자리는 그대로.
+    고친 곳 수."""
+    from docx.oxml.ns import qn
+    body = d.element.body
+    n = 0
+    # 문단 → 그 구역 본문 폭(pt)
+    width_of, pend = {}, []
+    for el in body:
+        sp = None
+        if el.tag == qn("w:p"):
+            pend.append(el)
+            sp = el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+        elif el.tag == qn("w:sectPr"):
+            sp = el
+        if sp is not None:
+            sz_, mg = sp.find(qn("w:pgSz")), sp.find(qn("w:pgMar"))
+            try:
+                w = (int(sz_.get(qn("w:w"))) - int(mg.get(qn("w:left"))) - int(mg.get(qn("w:right")))) / 20
+            except (TypeError, ValueError, AttributeError):
+                w = 480.0
+            for q in pend:
+                width_of[q] = w
+            pend = []
+    for q in pend:
+        width_of[q] = 480.0
+
+    def plain(p):
+        return p is not None and p.tag == qn("w:p") and p.getparent() is body and \
+            p.find(".//" + qn("w:drawing")) is None and p.find(".//" + qn("w:pict")) is None and \
+            p.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None and \
+            not any(b.get(qn("w:type")) == "page" for b in p.iter(qn("w:br")))
+
+    def starts(p):                                          # (첫 줄 시작, 둘째 줄부터 시작) twips
+        l, fl, hg = _ind_vals(p)
+        return l + fl - hg, l
+
+    def lead_bullet(p):
+        """(글머리 글자 또는 None, [글머리][탭] 의 그 탭 run 또는 None)"""
+        runs = [r for r in p if r.tag == qn("w:r")]
+        for i, r in enumerate(runs):
+            t = "".join(x.text or "" for x in r.findall(qn("w:t"))).strip()
+            if not t and r.find(qn("w:tab")) is None:
+                continue
+            if t and t[0] in HANG_BULLETS and len(t) == 1 and i + 1 < len(runs) and runs[i + 1].find(qn("w:tab")) is not None:
+                return t, runs[i + 1]
+            return (t[0] if t and t[0] in HANG_BULLETS else None), None
+        return None, None
+
+    def bold(x):
+        for r in x.iter(qn("w:r")):
+            if _par_text(r).strip():
+                rb = r.find(f"{qn('w:rPr')}/{qn('w:b')}")
+                return rb is not None and rb.get(qn("w:val")) not in ("0", "false")
+        return False
+
+    # ① 줄 바뀐 자리 탭
+    for p in list(body.findall(qn("w:p"))):
+        if not plain(p):
+            continue
+        W = width_of.get(p, 480.0)
+        b, btab = lead_bullet(p)
+        ppr = p.find(qn("w:pPr"))
+        tabs = ppr.find(qn("w:tabs")) if ppr is not None else None
+        stops = [int(t.get(qn("w:pos"))) for t in (tabs.findall(qn("w:tab")) if tabs is not None else [])
+                 if (t.get(qn("w:pos")) or "").lstrip("-").isdigit()]
+        first, cont = starts(p)
+        if btab is not None:
+            text_at = max(stops) if stops and max(stops) > first else cont
+        else:
+            text_at = first
+        acc, avail = 0.0, W - text_at / 20 - 2
+        runs = [r for r in p if r.tag == qn("w:r")]
+        seen_after = btab is None
+        changed = False
+        for i, r in enumerate(runs):
+            if not seen_after:
+                if r is btab:
+                    seen_after = True
+                continue
+            if r.find(qn("w:br")) is not None:
+                acc, avail = 0.0, W - cont / 20 - 2
+                continue
+            if r.find(qn("w:tab")) is not None and not _par_text(r).strip():
+                rest = "".join(_par_text(x) for x in runs[i + 1:]).strip()
+                if rest and acc >= 0.7 * avail:
+                    for tb in r.findall(qn("w:tab")):
+                        r.remove(tb)
+                    changed = True
+                    avail = W - cont / 20 - 2
+                acc = 0.0
+                continue
+            acc += _run_w_pt(r)
+        if changed:
+            n += 1
+            if btab is not None and stops and max(stops) > first and tabs is not None:
+                pos = max(stops)                            # [글머리][탭] + 탭 자리 → 둘째 줄을 글 시작에(내어쓰기)
+                _set_ind(p, pos, pos - first)
+                ppr.remove(tabs)
+
+    # ② 쪼개진 줄 합치기
+    merged = []
+    p = body[0] if len(body) else None
+    while p is not None:
+        q = p.getnext()
+        if not (plain(p) and plain(q)):
+            p = q
+            continue
+        t1, t2 = _par_text(p), _par_text(q)
+        ok = bool(t1.strip()) and bool(t2.strip()) and t2.lstrip()[:1] not in HANG_BULLETS and \
+            not _NUM_START_RE.match(t2) and not re.search(r"([.:。]|[다임음함됨]\.?)\s*$", t1.rstrip()) and \
+            not any(b_.get(qn("w:type")) in (None, "textWrapping") for b_ in p.iter(qn("w:br")))
+        if ok:
+            b1, h1, r1, l1 = _line_h(p)
+            b2, h2, r2, l2 = _line_h(q)
+            f1, c1 = starts(p)
+            f2, _ = starts(q)
+            W = width_of.get(p, 480.0)
+            _, lbt = lead_bullet(p)
+            # 윗줄의 '마지막 줄' 이 얼마나 찼나(이미 합친 문단이면 전체 길이를 줄 폭으로 나눈 나머지)
+            used = sum(_run_w_pt(r) for r in p if r.tag == qn("w:r") and r is not lbt)
+            first_avail = W - ((c1 if lbt is not None else max(f1, 0)) / 20)
+            cont_avail = W - c1 / 20
+            if used > first_avail:
+                last = (used - first_avail) % max(cont_avail, 1)
+                fill = last / max(cont_avail, 1)
+            else:
+                fill = used / max(first_avail, 1)
+            jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+            ok = abs(_par_size(p) - _par_size(q)) < 0.6 and bold(p) == bold(q) and r1 == r2 and \
+                abs((l1 or 0) - (l2 or 0)) <= max(12, 0.1 * (l1 or 240)) and b2 <= 14 and \
+                abs(f2 - c1) <= 120 and fill >= 0.8 and \
+                (jc is None or jc.get(qn("w:val")) in ("left", "both", "center", "start", "distribute"))
+        if not ok:
+            p = q
+            continue
+        pitch = b2 + h2                                     # 원본 줄 사이 거리
+        lead = True
+        for ch in [c for c in q if c.tag != qn("w:pPr")]:
+            if lead and ch.tag == qn("w:r") and ch.find(qn("w:tab")) is not None and not _par_text(ch).strip():
+                continue                                    # 아랫줄 맨 앞 탭(들여쓰기 흉내)은 버림
+            lead = False
+            p.append(ch)
+        q.getparent().remove(q)
+        if p.get("_pitch_b") is None:
+            p.set("_pitch_b", str(b1 + h1))                 # 첫 줄 아래 끝(앞 간격+줄 높이)은 그대로 지킨다
+            merged.append(p)
+        p.set("_pitch", str(max(pitch, float(p.get("_pitch") or 0))))
+        _set_jc(p, "both")
+        n += 1                                              # p 를 그대로 두고 다음 줄(3줄 이상)도 이어 본다
+    for p in merged:
+        pitch, top = float(p.get("_pitch")), float(p.get("_pitch_b"))
+        _set_pitch(p, top - pitch, pitch)
+        for a in ("_pitch", "_pitch_b"):
+            p.attrib.pop(a, None)
+
+    # ③ 이어지는 글머리 묶음 줄 간격 같게(같은 글머리·같은 시작점, 사이에 다른 것 없을 때)
+    p = body[0] if len(body) else None
+    while p is not None:
+        b = lead_bullet(p)[0] if plain(p) else None
+        if b is None:
+            p = p.getnext()
+            continue
+        grp, q = [p], p.getnext()
+        while plain(q) and lead_bullet(q)[0] == b and abs(starts(q)[0] - starts(p)[0]) <= 60:
+            grp.append(q)
+            q = q.getnext()
+        # ★줄 사이 거리는 '원본에서 한 줄짜리' 글머리로만 잰다 — 여러 줄 문단 사이의 '앞 간격' 은 문단 간격이지 줄 간격이 아니다
+        #   (돈암 하이라이트: 글머리마다 여러 줄 문단 → 줄 간격이 두 배로 벌어져 한 쪽이 넘쳤다, 2026-10-21)
+        def one_line(x):
+            _, bt = lead_bullet(x)
+            f_, c_ = starts(x)
+            ppr_ = x.find(qn("w:pPr"))
+            tb_ = ppr_.find(qn("w:tabs")) if ppr_ is not None else None
+            st_ = [int(t.get(qn("w:pos"))) for t in (tb_.findall(qn("w:tab")) if tb_ is not None else [])
+                   if (t.get(qn("w:pos")) or "").lstrip("-").isdigit()]
+            at = max(st_ + [c_]) if bt is not None else f_
+            w_ = sum(_run_w_pt(r) for r in x if r.tag == qn("w:r") and r is not bt and r.find(qn("w:tab")) is None)
+            return w_ <= width_of.get(x, 480.0) - at / 20 - 2
+        singles = [x for x in grp[1:] if one_line(x)]
+        if len(grp) >= 2 and singles:
+            pitches = sorted(sum(_line_h(x)[:2]) for x in singles)
+            pitch = pitches[len(pitches) // 2]
+            if pitch >= max(_par_size(x) for x in grp) * 1.2:
+                for i, x in enumerate(grp):
+                    bx, hx, _, _ = _line_h(x)
+                    _set_pitch(x, (bx + hx - pitch) if i == 0 else 0.0, pitch)
+                n += 1
+        p = q
     return n
 
 

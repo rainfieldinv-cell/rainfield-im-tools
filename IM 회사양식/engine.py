@@ -846,9 +846,10 @@ def paint_headers(doc):
     frames = [t for t in body.iter(qn("w:tbl")) if _is_frame(t)]
     frame_ids = set(map(id, frames))
     for tbl in body.iter(qn("w:tbl")):
-        if any(not _is_wrapper(a) for a in tbl.iterancestors(qn("w:tbl"))):
-            continue                                          # 표 안의 표는 전부 원본 색 그대로(2026-10-08 확정, 10-13 이천 대월에서 바로잡음)
-                                                              # ★단 pdf2docx 가 표 전체를 감싼 '1칸짜리 껍데기 표' 는 표로 안 친다(방배동)
+        # ★2026-10-21 사용자 확정(10-08·10-13 '표 안의 표는 원본 색' 을 뒤집음): 표 안의 표도 회사 형식 —
+        #   머리글·구분 칸 네이비. 단 안쪽 표는 검정·회색·남색 칸만(빨강·노랑 같은 강조 칸은 원본 색 그대로).
+        #   pdf2docx 가 표 전체를 감싼 '1칸짜리 껍데기 표' 는 표로 안 친다(방배동).
+        inner = any(not _is_wrapper(a) for a in tbl.iterancestors(qn("w:tbl")))
         rows = tbl.findall(qn("w:tr"))
         if not rows:
             continue
@@ -861,7 +862,7 @@ def paint_headers(doc):
             for row in cells:                                 # 한 줄짜리 제목 띠 등 — 진한 칸만
                 for tc in row:
                     f = _fill(tc)
-                    if f and _lum(f) < 0.5 and f != NAVY:
+                    if f and _lum(f) < 0.5 and f != NAVY and not (inner and not (_grayish(f) or _navy_like(f))):
                         _paint_navy(tc)
                         n += 1
             continue
@@ -885,6 +886,8 @@ def paint_headers(doc):
         for i, row in enumerate(cells):
             for tc in row:
                 f = _fill(tc)
+                if inner and f and not (_grayish(f) or _navy_like(f)):
+                    continue                               # 안쪽 표의 강조색 칸은 그대로
                 if i in head or (f and _lum(f) < 0.5):     # 진한 칸은 어디 있든 머리글로 본다
                     if f != NAVY or i in head:
                         _paint_navy(tc)
@@ -896,6 +899,15 @@ def paint_headers(doc):
             _paint_navy(tc)
             n += 1
     return n
+
+
+def _grayish(hexs):
+    """검정·회색(색 기운 없음)인가."""
+    try:
+        r, g, b = (int(hexs[i:i + 2], 16) for i in (0, 2, 4))
+    except Exception:
+        return False
+    return max(r, g, b) - min(r, g, b) <= 40
 
 
 def _navy_like(hexs):
@@ -1139,6 +1151,7 @@ def _text_width_pt(text, size_pt, bold=True):
     return sum(_pi._char_w(ch, tbl) for ch in text) * size_pt
 
 
+FOOTER_LINE_EMU = 157607                    # 꼬리말 한 줄(쪽 번호) 높이 — 워드 렌더 실측(꼬리말 선 793.74pt, 문단 위 798.29pt)
 STRICTLY_X, STRICTLY_Y = 157480, 133350   # 'Strictly Confidential' 상자 — 종이 왼쪽·위에서 EMU(12.4pt·10.5pt)
 
 
@@ -1630,9 +1643,7 @@ def _build_contact_section(doc, contacts):
     _para_fmt(p, "left", 8, 0)
     _run(p, "본 자료와 관련하여 문의사항이 있으실 경우 아래의 담당자에게 언제든지 연락하여 주시면 "
             "성심껏 답변하여 드리겠습니다.", 9)
-    p = doc.add_paragraph()
-    _para_fmt(p, "center", 220, 0)
-    _run(p, "끝", 11)
+    # '끝' 은 쓰지 않는다(2026-10-21 사용자)
     return [e for e in body if not any(e is b for b in before) and e.tag != qn("w:sectPr")]
 
 
@@ -1797,6 +1808,26 @@ def _template_contact_els(tpl, doc):
                 for ch in list(ph):
                     ph.remove(ch)
                 etree.SubElement(ph, "{%s}posOffset" % WP).text = "0"
+            # ★상자 안 줄 간격(2026-10-21 사용자가 고쳐 보여 줌): 회사 이름 / (조금 띄움) / 담당자 셋은 붙여서.
+            #   문단마다 '뒤 간격' 이 비어 있어 스타일 기본값(한 줄 가까이)이 들어가 줄마다 크게 벌어졌다.
+            ps = [p for p in anc.iter(qn("w:p")) if "".join(t.text or "" for t in p.iter(qn("w:t"))).strip()]
+            for i, p in enumerate(ps):
+                ppr = _first_child(p, "pPr")
+                sp = ppr.find(qn("w:spacing"))
+                if sp is None:
+                    sp = ppr.makeelement(qn("w:spacing"), {})
+                    _put(ppr, sp)
+                sp.set(qn("w:before"), "0")
+                sp.set(qn("w:after"), "160" if i == 0 else "0")
+                sp.set(qn("w:line"), "276")
+                sp.set(qn("w:lineRule"), "auto")
+    # ★'끝' 글은 쓰지 않는다(2026-10-21 사용자) — 상자 뒤 빈 문단들도 같이(빈 쪽·쓸데없는 줄 방지)
+    def _txt(el):
+        return "".join(t.text or "" for t in el.iter(qn("w:t"))).strip()
+    out = [el for el in out if not (el.tag == qn("w:p") and _txt(el) == "끝" and el.find(".//" + qn("w:drawing")) is None)]
+    while out and out[-1].tag == qn("w:p") and not _txt(out[-1]) and out[-1].find(".//" + qn("w:drawing")) is None \
+            and out[-1].find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None:
+        out.pop()
     return out
 
 
@@ -1987,6 +2018,113 @@ def fix_compressed_line_spacing(doc):
     return n
 
 
+_NUM_CELL_RE = re.compile(r"^[\s\-–()△▲▼+]*[\d][\d,.\s]*(%|원|억원|백만원|천원|세대|평|㎡|배|x|X)?[\s)]*$")
+
+
+def straighten_alignment(doc):
+    """정렬 똑바로(2026-10-21 사용자: '글상자든 도형 글이든 표 내용이든 정렬 항상 똑바로').
+    원인: pdf2docx 는 글 시작 자리를 원본 글자 위치로 줄마다 따로 재서 들여쓰기로 흉내 낸다 → 같은 목록·같은 칸·같은 제목 단계인데도
+      1~5pt 씩 들쭉날쭉(이천 마지막 ✓ 글머리 374 vs 402, 대전 소제목 84 vs 6, 숫자 칸 '1,762.0' 0 vs '533.0' 84).
+    ① 같은 글 자리(본문 한 쪽·표 칸 하나·글상자 하나) 안에서 시작점이 5pt 안으로 가까운 것끼리 가장 많이 쓴 자리로 맞춘다
+       (첫 줄 시작·둘째 줄 시작 따로. 하위 단계처럼 5pt 넘게 들여 쓴 것은 그대로).
+    ② 표 한 열의 숫자 칸들이 들여쓰기로 오른쪽 맞춤을 흉내 냈으면(시작점이 서로 다름) → 진짜 오른쪽 맞춤.
+    바꾼 문단 수."""
+    import pdf_input as _pi
+    TOL = 100                                               # twips(5pt)
+    n = 0
+    body = doc.element.body
+
+    def lefts(ps):
+        out = []
+        for p in ps:
+            if not _vis_text(p).strip() or p.find(".//" + qn("w:drawing")) is not None:
+                continue
+            jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
+            if jc is not None and jc.get(qn("w:val")) in ("center", "right", "end"):
+                continue
+            l, fl, hg = _pi._ind_vals(p)
+            out.append((p, l + fl - hg, l))
+        return out
+
+    def snap(items):
+        nonlocal n
+        vals = sorted(v for _, s, c in items for v in {s, c})
+        if len(vals) < 2:
+            return
+        groups, cur = [], [vals[0]]
+        for v in vals[1:]:
+            if v - cur[-1] <= TOL and v - cur[0] <= TOL * 1.6:
+                cur.append(v)
+            else:
+                groups.append(cur)
+                cur = [v]
+        groups.append(cur)
+        cnt = {}
+        for _, s, c in items:
+            cnt[s] = cnt.get(s, 0) + 1
+            if c != s:
+                cnt[c] = cnt.get(c, 0) + 1
+        target = {}
+        for g in groups:
+            best = max(g, key=lambda v: (cnt.get(v, 0), -v))
+            for v in g:
+                target[v] = best
+        for p, s, c in items:
+            ns, nc = target.get(s, s), target.get(c, c)
+            if (ns, nc) == (s, c):
+                continue
+            if ns < nc:
+                _pi._set_ind(p, nc, nc - ns)
+            else:
+                _pi._set_ind(p, nc)
+                if ns > nc:
+                    p.find(f"{qn('w:pPr')}/{qn('w:ind')}").set(qn("w:firstLine"), str(ns - nc))
+            n += 1
+
+    # ① 본문(구역=쪽 단위)
+    run = []
+    for el in body:
+        if el.tag == qn("w:p"):
+            run.append(el)
+            if el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None:
+                snap(lefts(run))
+                run = []
+    snap(lefts(run))
+    # ① 표 칸·글상자
+    for tc in body.iter(qn("w:tc")):
+        snap(lefts([p for p in tc if p.tag == qn("w:p")]))
+    for bx in body.iter(qn("w:txbxContent")):
+        snap(lefts([p for p in bx if p.tag == qn("w:p")]))
+    # ② 숫자 열 → 오른쪽 맞춤
+    for tbl in body.iter(qn("w:tbl")):
+        cols = {}
+        for tr in tbl.findall(qn("w:tr")):
+            c = 0
+            for tc in tr.findall(qn("w:tc")):
+                span = tc.find(f"{qn('w:tcPr')}/{qn('w:gridSpan')}")
+                k = int(span.get(qn("w:val"))) if span is not None and (span.get(qn("w:val")) or "").isdigit() else 1
+                ps = [p for p in tc if p.tag == qn("w:p") and _vis_text(p).strip()]
+                if len(ps) == 1 and _NUM_CELL_RE.match(_vis_text(ps[0]).strip()):
+                    cols.setdefault((c, k), []).append(ps[0])
+                c += k
+        for ps in cols.values():
+            items = lefts(ps)
+            if len(items) < 2 or len({s for _, s, _ in items}) < 2:
+                continue
+            for p, s, c in items:
+                _pi._set_ind(p, 0, 0, 0)
+                ppr = p.find(qn("w:pPr"))
+                jc = ppr.find(qn("w:jc"))
+                if jc is None:
+                    jc = ppr.makeelement(qn("w:jc"), {})
+                    after = next((ppr.find(qn(t)) for t in ("w:textAlignment", "w:rPr", "w:sectPr")
+                                  if ppr.find(qn(t)) is not None), None)
+                    after.addprevious(jc) if after is not None else ppr.append(jc)
+                jc.set(qn("w:val"), "right")
+                n += 1
+    return n
+
+
 def loosen_exact_rows(doc):
     """글이 든 표 줄의 '정확히(exact)' 높이 → '최소(atLeast)'. 글꼴이 Pretendard 로 바뀌어 넓어지면 두 줄로 꺾이는데
     높이가 고정이면 둘째 줄이 잘렸다(등촌 14쪽 회사소개 '주소' 칸, 2026-10-20). 쪽을 줄이지 않은 쪽(s=1)은
@@ -2017,6 +2155,19 @@ def paint_label_columns(doc):
                 line += [tc] * k
             grid.append(line)
         ncol = max(len(r) for r in grid)
+        # ★맨 윗줄 첫 칸이 '구분' 인 표 = 첫 열이 항목(구분) 칸 → 열 전체 네이비(2026-10-21 사용자: 표 안의 표까지 모든 표
+        #   '구분·머리글 = 네이비'. 이천 금융조건 차주·PM사…, 안쪽 일정표 납입율·납입주체 — 원본은 흰 바탕 굵은 글씨였다)
+        if grid and grid[0] and re.sub(r"\s", "", _vis_text(grid[0][0])) == "구분":
+            for r in grid[1:]:
+                tc = r[0] if r else None
+                if tc is None or tc is grid[0][0] or len(r) and r.count(tc) >= ncol or \
+                        tc.find(".//" + qn("w:tbl")) is not None:
+                    continue                               # 한 줄 전체를 덮은 칸·안에 표가 든 칸은 아님
+                f = _fill(tc)
+                if f == NAVY or (f and not (_grayish(f) or _navy_like(f))):
+                    continue                               # 이미 네이비·강조색 칸은 그대로
+                _paint_navy(tc)
+                n += 1
         body_rows = [r for r in grid if not all(_fill(tc) == NAVY for tc in r if tc is not None)]
         if len(body_rows) < 2:
             continue
@@ -2052,11 +2203,24 @@ def apply_company_geometry(doc):
     A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
     seen = set()
     for sec in doc.sections:
-        for hf in (sec.header, sec.footer):
+        for is_head, hf in ((True, sec.header), (False, sec.footer)):
             el = hf._element
             if id(hf.part) in seen:
                 continue
             seen.add(id(hf.part))
+            # ★머리말·꼬리말 선·로고를 '문단 기준' → '쪽 기준' 고정 자리로(2026-10-21 사용자: 연락처 쪽에서 머리말 글이 선 아래로
+            #   내려와 보였다). 문단 기준이면 워드가 화면에서 문단을 다시 배치할 때(편집·클릭) 선이 글과 따로 움직였다.
+            #   머리말 문단 위 = 머리말 거리, 꼬리말 문단 위 = 쪽 높이 − 꼬리말 거리 − 꼬리말 한 줄 높이(쪽 번호 9pt 줄, 워드 실측 12.41pt).
+            sec0 = doc.sections[0]
+            base = int(sec0.header_distance) if is_head else \
+                int(sec0.page_height) - int(sec0.footer_distance) - FOOTER_LINE_EMU
+            for anc in el.iter(WP + "anchor"):
+                pv = anc.find(WP + "positionV")
+                off_v = pv.find(WP + "posOffset") if pv is not None else None
+                if pv is not None and pv.get("relativeFrom") == "paragraph" and off_v is not None and \
+                        (off_v.text or "").lstrip("-").isdigit():
+                    pv.set("relativeFrom", "page")
+                    off_v.text = str(base + int(off_v.text))
             for anc in el.iter(WP + "anchor"):
                 ext = anc.find(WP + "extent")
                 if ext is None:
@@ -2709,6 +2873,62 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
                     st = ppr.find(qn("w:pStyle"))
                     (st.addnext(kn) if st is not None else ppr.insert(0, kn))
             el = el.getnext()
+    # ★한 쪽 = 사모사채 개요 + 금융 개요 > 1. 금융 구조도 '만'. 그 뒤(2. 본건 기초자산 금융조건 ~)는 늘 다음 쪽에서
+    #   (2026-10-21 사용자: 이천에서 2번 표가 같은 쪽에 붙어 나옴)
+    if last is not None and last.getparent() is body:
+        nx = last.getnext()
+        while nx is not None and nx.tag == qn("w:p") and not _vis_text(nx).strip() and \
+                nx.find(".//" + qn("w:drawing")) is None and nx.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None:
+            nx = nx.getnext()
+        if nx is not None and nx.tag != qn("w:sectPr") and \
+                not (nx.tag == qn("w:p") and nx.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None):
+            if nx.tag != qn("w:p"):                         # 표면 앞에 '쪽 나눔 문단'(1pt)을 둔다
+                brk = etree.Element(qn("w:p"))
+                bppr = etree.SubElement(brk, qn("w:pPr"))
+                etree.SubElement(bppr, qn("w:spacing"), {qn("w:before"): "0", qn("w:after"): "0",
+                                                         qn("w:line"): "20", qn("w:lineRule"): "exact"})
+                nx.addprevious(brk)
+                nx = brk
+            ppr = nx.find(qn("w:pPr"))
+            if ppr is None:
+                ppr = etree.Element(qn("w:pPr"))
+                nx.insert(0, ppr)
+            if ppr.find(qn("w:pageBreakBefore")) is None:
+                pb = etree.Element(qn("w:pageBreakBefore"))
+                anchor_ = next((ppr.find(qn(t)) for t in ("w:keepLines", "w:keepNext", "w:pStyle")
+                                if ppr.find(qn(t)) is not None), None)
+                (anchor_.addnext(pb) if anchor_ is not None else ppr.insert(0, pb))
+            rep["금융조건 다음 쪽"] = True
+            # 새 쪽으로 넘긴 부분이 짧고 바로 원본 쪽 나눔이 오면(대전: 금융조건 표 첫 두 줄만 있고 나머지는 원본 다음 쪽)
+            # 그 쪽이 거의 빈 채로 남았다 → 다음 원본 쪽을 '이어서'(continuous) 시작하게
+            el, rows_, pars_ = nx, 0, 0
+            while el is not None and not (el.tag == qn("w:p") and el.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None):
+                if el.tag == qn("w:tbl"):
+                    rows_ += len(el.findall(".//" + qn("w:tr")))
+                elif el.tag == qn("w:p") and _vis_text(el).strip():
+                    pars_ += 1
+                el = el.getnext()
+            if el is not None and rows_ <= 8 and pars_ <= 4:
+                nxt_sp = el.getnext()
+                while nxt_sp is not None and not (nxt_sp.tag == qn("w:sectPr") or (nxt_sp.tag == qn("w:p") and
+                                                   nxt_sp.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None)):
+                    nxt_sp = nxt_sp.getnext()
+                if nxt_sp is not None:
+                    sp2 = nxt_sp if nxt_sp.tag == qn("w:sectPr") else nxt_sp.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+                    ty = sp2.find(qn("w:type"))
+                    if ty is None:
+                        ty = etree.Element(qn("w:type"))
+                        anchor_ = next((sp2.find(qn(t)) for t in ("w:footnotePr", "w:endnotePr", "w:footerReference",
+                                                                    "w:headerReference") if sp2.find(qn(t)) is not None), None)
+                        if anchor_ is not None:
+                            # footer/header 참조 뒤, footnotePr 뒤 — type 은 그 다음, pgSz 앞
+                            refs = [c for c in sp2 if etree.QName(c).localname in
+                                    ("headerReference", "footerReference", "footnotePr", "endnotePr")]
+                            refs[-1].addnext(ty)
+                        else:
+                            sp2.insert(0, ty)
+                    ty.set(qn("w:val"), "continuous")
+                    rep["금융조건 이어 붙임"] = True
     # 대단원 번호 다시 매김
     v = 0
     for h in _major_headings(doc):
@@ -2846,6 +3066,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep["줄 간격 1 미만 → 고정 간격"] = fix_compressed_line_spacing(doc)
     rep["구분 칸 네이비"] = paint_label_columns(doc)
     rep["고정 줄 높이 풀기"] = loosen_exact_rows(doc)
+    rep["정렬 똑바로"] = straighten_alignment(doc)
     rep["표지 상자 맞춤"] = fit_cover_boxes(doc)
     rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)
