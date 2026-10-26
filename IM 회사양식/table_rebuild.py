@@ -73,10 +73,14 @@ def _page_art(page):
                 continue
             # ★선 굵기 한도 1.6 → 3.0pt: 롯데 민감도 표 빨간 강조 네모(2.2pt 칠한 막대)가 선으로도 칠로도 안 잡혀
             #   그 칸 경계가 사라지고 4.25·4.50·4.75 세 열이 한 칸으로 합쳐졌다(2026-10-26)
-            if dr.get("fill") is not None and r.width > 3.0 and r.height > 3.0:
-                fills.append((r, _hex(dr["fill"])))
+            #   단 1.6pt 넘게 두꺼운 건 **진한 색일 때만** 선 — 연한 칸 바탕을 2.9pt 띠 여러 개로 칠한 원본(롯데 운영비용 가정)에서
+            #   그 띠까지 선으로 읽어 가짜 줄이 생기고 '2.00%' 6칸이 한 칸으로 합쳐졌다(표 검사기로 찾음, 2026-10-26)
+            fc = dr.get("fill")
+            dark = fc is not None and (0.299 * fc[0] + 0.587 * fc[1] + 0.114 * fc[2]) < 0.6
             thin = min(r.width, r.height)
-            if dr.get("fill") is not None and thin <= 3.0 and max(r.width, r.height) >= 2:
+            if fc is not None and r.width > 2.5 and r.height > 2.5 and not (dark and thin <= 3.0):
+                fills.append((r, _hex(fc)))
+            if fc is not None and (thin <= 1.6 or (dark and thin <= 3.0)) and max(r.width, r.height) >= 2:
                 lines.append((r, _hex(dr["fill"]), max(thin, 0.25), dashed))
             elif dr.get("color") is not None and (it[0] == "l" or dr.get("fill") is None):
                 w = max(dr.get("width") or 0.5, 0.25)
@@ -129,6 +133,18 @@ def _take_underlines(lines, text_lines, box):
     선이 글 줄 아래 끝 바로 밑(−2~+4pt)에 있고, 그 줄 글자 범위 안(±4pt)에 들어가며 글자가 실제로 위에 있을 때만.
     돌려줌: 남길 선 목록."""
     keep = []
+    hs = [ln[0] for ln in lines if ln[0].width >= ln[0].height * 3]
+
+    def chain(r):
+        """r 과 같은 높이로 이어진(틈 2pt 안) 가로선 묶음 전체 x 범위."""
+        y = (r.y0 + r.y1) / 2
+        x0, x1, grew = r.x0, r.x1, True
+        while grew:
+            grew = False
+            for o in hs:
+                if abs((o.y0 + o.y1) / 2 - y) <= 0.6 and o.x1 >= x0 - 2 and o.x0 <= x1 + 2 and (o.x0 < x0 or o.x1 > x1):
+                    x0, x1, grew = min(x0, o.x0), max(x1, o.x1), True
+        return x0, x1
     for ln in lines:
         r = ln[0]
         if r.width < r.height * 3 or r.width < 6 or not (box + (-2, -2, 2, 2)).intersects(r):
@@ -145,6 +161,13 @@ def _take_underlines(lines, text_lines, box):
                 continue
             xs = [cb for s, i, cb in chars if r.x0 - 1 <= (cb.x0 + cb.x1) / 2 <= r.x1 + 1]
             if min(c.x0 for c in xs) - 4 <= r.x0 and r.x1 <= max(c.x1 for c in xs) + 4:
+                # ★같은 높이 선이 글자 밖까지 이어져 있으면 표 테두리(칸 아래 선)다 — 롯데 임대사례 '주소' 칸 글자가
+                #   아래 테두리에 붙어 있어 테두리를 밑줄로 지웠고 주소·준공연도 칸이 합쳐졌다(표 검사기로 찾음, 2026-10-26)
+                cx0, cx1 = chain(r)
+                lo = min(cb.x0 for s, i, cb in chars)
+                hi = max(cb.x1 for s, i, cb in chars)
+                if cx0 < lo - 6 or cx1 > hi + 6:
+                    break
                 hit = over
                 break
         if hit is None:
@@ -764,6 +787,9 @@ class _Abort(Exception):
 
 def _pic_par(part, png, rect, cell):
     import io
+    f = min(1.0, (cell.width - 2) / max(rect.width, 1))       # 칸 밖으로 삐져나온 사진은 비율 그대로 칸 폭에(자르지 않음)
+    if f < 1.0:
+        rect = fitz.Rect(cell.x0 + 1, rect.y0, cell.x0 + 1 + rect.width * f, rect.y0 + rect.height * f)
     inline = part.new_pic_inline(io.BytesIO(png), int(rect.width * 12700), int(rect.height * 12700))
     p = etree.Element(qn("w:p"))
     pp = etree.SubElement(p, qn("w:pPr"))
@@ -797,6 +823,12 @@ def _build(page, segs, box, lines, fills, text_lines, old_pr=None, nested=False,
         if any((b + (-2, -2, 2, 2)).contains(r) for b in ibox):
             continue                                           # 안쪽 표가 가진다
         k = next((k for k, cr in enumerate(rects) if (cr + (-2, -2, 2, 2)).contains(r)), None)
+        if k is None and r.get_area() > 0:
+            # ★사진이 칸 밖으로 조금(표 끝 너머 5pt 등) 삐져나온 원본 — 75% 넘게 한 칸 안이면(사진끼리 겹친 원본은 83%) 그 칸 사진(롯데 매매사례 알파돔타워 사진 때문에
+            #   표를 통째 못 짜 pdf2docx 표가 남아 '거래면적·거래시기·평당가' 가 한 칸으로 합쳐졌다, 표 검사기로 찾음 2026-10-26)
+            best = max(range(len(rects)), key=lambda q: (rects[q] & r).get_area() if rects[q].intersects(r) else 0)
+            if rects[best].intersects(r) and (rects[best] & r).get_area() >= 0.75 * r.get_area():
+                k = best
         if k is None:
             raise _Abort("그림이 칸 경계에 걸침")                 # 칸에 안 들어가는 그림 → 이 표는 pdf2docx 것 그대로
         pic_of.setdefault(k, []).append(g_i)

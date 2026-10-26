@@ -118,6 +118,8 @@ def find_highlight_pages(pdf_bytes):
 
 BOND_NEED_PT = 270    # 사모사채 개요(제목 + 9줄 표)에 드는 높이 어림(약 9.5cm)
 FIN_HEAD_PT = 75      # 금융 개요 대단원 제목 + '1. 금융 구조도' 소제목 + 사이 띄움
+BIG_TABLE_S = 0.6        # 이보다 더 줄여야 들어가는 쪽에 10줄 넘는 표가 있으면 → 줄이지 않고 다음 쪽으로 잇는다
+BIG_TABLE_KEEP_S = 0.85  # 그때 쓰는 비율(다른 쪽들과 비슷한 크기)
 FIT_FLOOR = 0.30      # 쪽 줄이기 최저 비율 — 9pt 고정 글만으로도 안 들어가는 빽빽한 표 쪽(내곡 분양가 테이블)만 여기까지 내려간다
 
 
@@ -3193,6 +3195,15 @@ def _fit_page(secs, grps, box, lines=None):
                         hi = mid
                 s = lo
         used = need(s)
+    # ★한 쪽에 안 들어가는 빽빽한 표(2026-10-26 사용자 확정): 쪼그라뜨리지 말고 다음 쪽으로 잇는다 —
+    #   글자·그림을 줄여 억지로 넣던 것(최저 0.30) 대신 보통 크기로 두고 paginate_big_table 이 항목 단위로 나눠 머리글을 반복한다.
+    big = None
+    if s < BIG_TABLE_S:
+        tbls = [el for grp in grps for el in grp if el.tag == qn("w:tbl") and len(el.findall(qn("w:tr"))) >= 10]
+        if tbls:
+            big = max(tbls, key=lambda t: len(t.findall(qn("w:tr"))))
+            s = min(sw, BIG_TABLE_KEEP_S)
+            used = BOX_H_PT                                  # 쪽을 꽉 쓴다고 본다(그림 키우지 않게)
     for i, sec in enumerate(secs):
         _set_geometry(sec, new_page=(i == 0))
         cols = sec._sectPr.find(qn("w:cols"))               # 2단 같은 단 너비·간격도 같은 비율로
@@ -3229,7 +3240,151 @@ def _fit_page(secs, grps, box, lines=None):
     #   + 어림 오차 몫으로 쪽 높이 5% 는 남겨 둔다(그림이 6pt 만 커져도 꽉 찬 쪽 끝 각주가 넘쳤다 — 내곡 31쪽)
     #   + 9pt 로 다시 커지는 몫(used 에 포함)도 빼야 한다 — 빼먹어 내곡 29쪽이 183pt 남는다고 셌다
     grow_pictures_to_width(grps, 0.5 * max(0.0, BOX_H_PT * (HEIGHT_SAFETY - 0.05) - used))
+    if big is not None:
+        paginate_big_table(grps, big)
+    for grp in grps:                                         # 워드가 스스로 쪽을 넘겨도 머리글이 다음 쪽에 반복되게(■ 표시 안 생김)
+        for el in grp:
+            if el.tag == qn("w:tbl") and len(el.findall(qn("w:tr"))) >= 8:
+                for tr in el.findall(qn("w:tr"))[:_header_rows(el)]:
+                    trpr = tr.find(qn("w:trPr"))
+                    if trpr is None:
+                        trpr = tr.makeelement(qn("w:trPr"), {})
+                        tr.insert(0, trpr)
+                    if trpr.find(qn("w:tblHeader")) is None:
+                        trpr.append(trpr.makeelement(qn("w:tblHeader"), {}))
     return s, box.height * s
+
+
+def _header_rows(tbl):
+    """머리글 줄 수 — 맨 윗줄과 같은 바탕색인 위쪽 줄(최대 3). 바탕이 없으면 1줄."""
+    from docx.oxml.ns import qn
+    def dom(tr):
+        fs = []
+        for tc in tr.findall(qn("w:tc")):
+            sh = tc.find(f"{qn('w:tcPr')}/{qn('w:shd')}")
+            f = (sh.get(qn("w:fill")) or "").upper() if sh is not None else ""
+            fs.append(None if f in ("", "AUTO", "FFFFFF") else f)
+        cs = [f for f in fs if f]
+        return (max(set(cs), key=cs.count) if cs else None), len(cs), len(fs)
+    rows = tbl.findall(qn("w:tr"))
+
+    def numeric(tr):                                       # 숫자·기호가 대부분인 줄 = 내용 줄(원본에서 앞 쪽 표가 이어진 쪽은 머리글이 없다)
+        t = re.sub(r"\s", "", "".join(x.text or "" for x in tr.iter(qn("w:t"))))
+        return bool(t) and sum(ch.isdigit() or ch in ",.-%~()/" for ch in t) >= 0.5 * len(t)
+    if numeric(rows[0]):
+        return 0
+    f0, k0, n0 = dom(rows[0])
+    if not f0 or k0 < 0.6 * n0:
+        return 1
+    n = 1
+    for tr in rows[1:3]:
+        f, k, m = dom(tr)
+        if f == f0 and k >= 0.6 * m and not numeric(tr):
+            n += 1
+        else:
+            break
+    return n
+
+
+def paginate_big_table(grps, tbl):
+    """한 쪽에 안 들어가는 표를 쪽마다 나눈다(2026-10-26 사용자 확정 규칙).
+    ① 표 앞에 다른 내용이 있으면 표를 통째로 다음 쪽에서 시작(쪽 나눔 줄 — ■ 표시가 안 생기는 줄바꿈 쪽 나눔).
+    ② 그래도 넘치면 **항목 단위**(세로로 합친 칸 묶음 중간은 안 자름)로 표를 나누고 다음 표 맨 위에 머리글 줄을 똑같이 복사.
+    ③ 어림이 빗나가 워드가 더 나누더라도 머리글은 반복(tblHeader)하고 줄은 안 쪼개지게(cantSplit).
+    나눈 표 수."""
+    import copy
+    from docx.oxml.ns import qn
+    body_els = [el for grp in grps for el in grp]
+    before = body_els[:body_els.index(tbl)] if tbl in body_els else []
+    # 표 바로 위 짧은 제목·단위 줄('2. 공동주택 개발사업 개요', '(단위: 천원)')은 표와 같이 다음 쪽으로(제목만 덩그러니 남았다, 내곡 17쪽)
+    k = len(before)
+    while k > 0 and before[k - 1].tag == qn("w:p") and before[k - 1].find(".//" + qn("w:drawing")) is None and             len(_par_text(before[k - 1]).strip()) <= 40 and len(before) - k < 4:
+        k -= 1
+    lead = before[k] if k < len(before) else tbl
+    if any(el.tag == qn("w:tbl") or (el.tag == qn("w:p") and (_par_text(el).strip() or
+           el.find(".//" + qn("w:drawing")) is not None)) for el in before[:k]):
+        brk = tbl.makeelement(qn("w:p"), {})
+        r = etree_sub(brk, "w:r")
+        etree_sub(r, "w:br", {qn("w:type"): "page"})
+        lead.addprevious(brk)
+    rows = tbl.findall(qn("w:tr"))
+    nh = _header_rows(tbl)
+    if nh == 0:
+        # ★원본에서 앞 쪽 표가 이어지는 쪽(머리글 없음 — 내곡 분양가 테이블 2~5쪽): 바로 앞의 같은 모양 표(열 수 같음) 머리글을
+        #   가져와 맨 위에 붙인다 — 머리글 없이 항목만 있으면 무엇이 구분·내용인지 모른다(2026-10-26 사용자)
+        ncol = len(tbl.findall(f"{qn('w:tblGrid')}/{qn('w:gridCol')}"))
+        prev = tbl.getprevious()
+        while prev is not None:
+            if prev.tag == qn("w:tbl") and len(prev.findall(f"{qn('w:tblGrid')}/{qn('w:gridCol')}")) == ncol:
+                k = _header_rows(prev)
+                if k:
+                    for h in reversed(prev.findall(qn("w:tr"))[:k]):
+                        rows[0].addprevious(copy.deepcopy(h))
+                    rows = tbl.findall(qn("w:tr"))
+                    nh = k
+                    break
+                prev = prev.getprevious()                    # 그 표도 이어진 표면 더 앞으로
+                continue
+            if prev.tag == qn("w:tbl"):
+                break                                        # 모양이 다른 표가 끼면 그만
+            prev = prev.getprevious()
+    for i, tr in enumerate(rows):
+        trpr = tr.find(qn("w:trPr"))
+        if trpr is None:
+            trpr = tr.makeelement(qn("w:trPr"), {})
+            tr.insert(0, trpr)
+        if trpr.find(qn("w:cantSplit")) is None:
+            trpr.insert(0, trpr.makeelement(qn("w:cantSplit"), {}))
+        if i < nh and trpr.find(qn("w:tblHeader")) is None:
+            trpr.append(trpr.makeelement(qn("w:tblHeader"), {}))
+
+    def boundary(tr):                                       # 이 줄에서 새 쪽을 시작해도 되나(세로 합친 칸 이어지는 줄이면 안 됨)
+        for tc in tr.findall(qn("w:tc")):
+            vm = tc.find(f"{qn('w:tcPr')}/{qn('w:vMerge')}")
+            if vm is not None and vm.get(qn("w:val")) in (None, "continue"):
+                return False
+        return True
+    hs = [_row_actual(tr, 1.0) for tr in rows]
+    page = BOX_H_PT * HEIGHT_SAFETY * 0.92                 # 어림 오차 몫
+    head_h = sum(hs[:nh])
+    cuts, acc, last_b = [], head_h, None
+    start = nh
+    for i in range(nh, len(rows)):
+        if boundary(rows[i]) and i > start:
+            last_b = i
+        if acc + hs[i] > page and last_b is not None and last_b > start:
+            cuts.append(last_b)
+            start = last_b
+            acc = head_h + sum(hs[last_b:i])
+            last_b = None
+        acc += hs[i]
+    if not cuts:
+        return 0
+    head = rows[:nh]                                       # 머리글 없는 표(nh=0)면 복사하지 않는다
+    prev = tbl
+    bounds = cuts + [len(rows)]
+    for a, b in zip(cuts, bounds[1:]):
+        new = copy.deepcopy(tbl)
+        for tr in new.findall(qn("w:tr")):
+            new.remove(tr)
+        for h in head:
+            new.append(copy.deepcopy(h))
+        for tr in rows[a:b]:
+            new.append(tr)                                  # 원래 표에서 옮긴다
+        brk = tbl.makeelement(qn("w:p"), {})
+        r = etree_sub(brk, "w:r")
+        etree_sub(r, "w:br", {qn("w:type"): "page"})
+        prev.addnext(brk)
+        brk.addnext(new)
+        prev = new
+    return len(cuts)
+
+
+def etree_sub(parent, tag, attrs=None):
+    from docx.oxml.ns import qn
+    el = parent.makeelement(qn(tag), attrs or {})
+    parent.append(el)
+    return el
 
 
 def grow_pictures_to_width(grps, slack_pt):
