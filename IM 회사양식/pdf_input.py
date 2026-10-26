@@ -153,19 +153,15 @@ def bond_place(rep, highlight_pages, diagram_png=None):
     ★개요 + 금융 개요 > 1. 금융 구조도(그림)는 한 쪽에 같이 있어야 한다(2026-10-21) → 구조도가 있으면 그 높이(본문 폭 기준)까지 넣어 잰다.
     하이라이트를 못 찾았으면 None = 표지 바로 다음 쪽.
     """
+    # ★2026-10-26 사용자 확정: 하이라이트 쪽에 자리가 남아도 **이어 붙이지 않는다** — 늘 하이라이트 다음 쪽에서
+    #   '사모사채 개요 + 금융 개요 > 1. 금융 구조도' 만 한 쪽(롯데백화점: 하이라이트 밑에 개요가 붙어 구조도가 다음 쪽으로 갈라졌다).
+    #   (diagram_png 는 예전 '자리 재기' 용 — 이제 쓰지 않지만 부르는 쪽 호환으로 둔다)
     if not highlight_pages:
         return None
-    need = BOND_NEED_PT
-    if diagram_png:
-        try:
-            pix = fitz.Pixmap(diagram_png)
-            need += FIN_HEAD_PT + BOX_W_PT * pix.height / max(pix.width, 1) + 12
-        except Exception:
-            need += FIN_HEAD_PT + 300
     last = max(highlight_pages)
     for k, p in enumerate(rep.get("쪽", [])):
         if p["원본쪽"] == last:
-            return (k, BOX_H_PT - p["높이"] >= need)
+            return (k, False)
     return None
 
 
@@ -1680,7 +1676,10 @@ def _run_w_pt(r):
     sz = rpr.find(qn("w:sz")) if rpr is not None else None
     size = int(sz.get(qn("w:val"))) / 2 if sz is not None and (sz.get(qn("w:val")) or "").isdigit() else 10.0
     b = rpr.find(qn("w:b")) if rpr is not None else None
-    tbl = _widths()["bold" if b is not None and b.get(qn("w:val")) not in ("0", "false") else "light"]
+    rf = rpr.find(qn("w:rFonts")) if rpr is not None else None
+    heavy = rf is not None and "bold" in ((rf.get(qn("w:eastAsia")) or rf.get(qn("w:ascii")) or "").lower())
+    # ★엔진 뒤에는 굵은 글씨 = 'Pretendard ExtraBold' 글꼴 + 굵게 끔(w:b=0) → 글꼴 이름으로도 굵기를 본다
+    tbl = _widths()["bold" if heavy or (b is not None and b.get(qn("w:val")) not in ("0", "false")) else "light"]
     spc = rpr.find(qn("w:spacing")) if rpr is not None else None
     extra = int(spc.get(qn("w:val"))) / 20 if spc is not None and (spc.get(qn("w:val")) or "").lstrip("-").isdigit() else 0.0
     txt = "".join(t.text or "" for t in r.findall(qn("w:t")))

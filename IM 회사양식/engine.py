@@ -626,7 +626,9 @@ FIN_TITLE = "본건 기초자산 금융조건"
 _FIN_TITLE_RE = re.compile(r"(주요\s*)?금융\s*(개요|조건|구조)|금융\s*조건|금\s*융\s*조\s*건")
 
 
-_STRUCT_RE = re.compile(r"^[\s■□▪◆◇●○▶▷❑❏\-\d.)(\[\]<>Ⅰ-ⅫIVX]*\s*(금융|사업|거래|딜|대출)?\s*구\s*조\s*(도)?\s*[)\]>]?\s*$")
+# ★'(안)'·'(예정)' 이 붙은 제목도(롯데백화점 '□ 금융구조도(안)' 이 안 걸려 원본 구조도가 그대로 남았다, 2026-10-26)
+_STRUCT_RE = re.compile(r"^[\s■□▪◆◇●○▶▷❑❏\-\d.)(\[\]<>Ⅰ-ⅫIVX]*\s*(금융|사업|거래|딜|대출|투자)?\s*구\s*조\s*(도)?\s*"
+                        r"(\(\s*(안|예정|案|가안|초안)\s*\)|\[\s*(안|예정)\s*\])?\s*[)\]>]?\s*$")
 
 
 def drop_structure_paragraphs(doc):
@@ -688,7 +690,7 @@ def drop_structure_rows(doc):
         if len(tcs) < 2:
             continue
         label = "".join(t.text or "" for t in tcs[0].iter(qn("w:t"))).replace(" ", "")
-        if len(label) > 12 or not re.search(r"(금융|사업|거래|대출|딜)?구조(도)?$", label):   # 신촌 '금융구조'(도 없음)
+        if len(label) > 16 or not re.search(r"(금융|사업|거래|대출|딜|투자)?구조(도)?(\((안|예정|案|가안|초안)\))?$", label):   # 신촌 '금융구조'(도 없음)·'(안)'
             continue
         if tr.find(".//" + qn("w:drawing")) is None and tr.find(".//" + qn("w:pict")) is None:
             continue
@@ -873,22 +875,28 @@ def paint_headers(doc):
                 head.add(i)
         body_fills = [_fill(tc) for row in cells[1:] for tc in row]
         common = max(set(body_fills), key=body_fills.count) if body_fills else None
-        for i in (0, 1):                                  # 맨 위 1~2줄이 칠해져 있으면 머리글
-            if i >= len(rows) - 1:
-                break
-            fills = [_fill(tc) for tc in cells[i]]
-            colored = [f for f in fills if f]
-            if len(colored) >= max(1, 0.6 * len(fills)) and (i == 0 or i - 1 in head) \
-                    and max(set(colored), key=colored.count) != common:
-                head.add(i)
-            else:
-                break
+        # ★머리글 = 맨 윗줄과 **같은 색** 으로 칠한 위쪽 줄들(최대 3줄). 2026-10-26 사용자:
+        #   롯데 사업수지 '매입비'(연회색 소계 줄)까지 머리글로 봄 → 색이 다르면 머리글 아님.
+        #   운영비용 가정(머리글 2줄 같은 하늘색)은 둘째 줄도 머리글. 같은 색 칸이 표 안 다른 곳에 있으면(매각 가정) 그것도 머리글.
+        def _dom(row):
+            cs = [f for f in (_fill(tc) for tc in row) if f]
+            return (max(set(cs), key=cs.count), len(cs)) if cs else (None, 0)
+        head_fill, k0 = _dom(cells[0])
+        if head_fill and k0 >= max(1, 0.6 * len(cells[0])) and head_fill != common:
+            for i in range(min(3, len(rows) - 1)):
+                f_, k_ = _dom(cells[i])
+                if f_ == head_fill and k_ >= max(1, 0.6 * len(cells[i])):
+                    head.add(i)
+                else:
+                    break
+        else:
+            head_fill = None
         for i, row in enumerate(cells):
             for tc in row:
                 f = _fill(tc)
-                if inner and f and not (_grayish(f) or _navy_like(f)):
+                if inner and f and not (_grayish(f) or _navy_like(f)) and not (head_fill and f == head_fill):
                     continue                               # 안쪽 표의 강조색 칸은 그대로
-                if i in head or (f and _lum(f) < 0.5):     # 진한 칸은 어디 있든 머리글로 본다
+                if i in head or (f and _lum(f) < 0.5) or (head_fill and f == head_fill):   # 진한 칸은 어디 있든 머리글로 본다
                     if f != NAVY or i in head:
                         _paint_navy(tc)
                         n += 1
@@ -2149,6 +2157,92 @@ def straighten_alignment(doc):
     return n
 
 
+_HEAD_MARK_RE = re.compile(r"^\s*([□■▶▷❑❏◆◇●○▪➢◼◻]|\(\s*\d{1,2}\s*\)|\d{1,2}\s*[.)](?!\d)|[①-⑳]|[가-하]\s*[.)])")
+
+
+def unify_heading_weights(doc):
+    """같은 단계 소제목은 굵기를 하나로(2026-10-26 사용자: '□ 설계 특장점' 은 Light, '□ 사업수지' 는 ExtraBold — 통일하라).
+    ★원본 자체가 들쭉날쭉했다(롯데 15~23쪽만 굵게). 같은 모양(앞 기호/번호 종류 + 글자 크기)인 표 밖 짧은 제목끼리 묶어
+      원본에서 더 많이 쓴 굵기로 맞춘다(얇으면 Light, 두꺼우면 ExtraBold, 같으면 ExtraBold). 바꾼 문단 수."""
+    groups = {}
+    for p in doc.element.body.findall(qn("w:p")):
+        t = _vis_text(p).strip()
+        if not t or len(t) > 45:
+            continue
+        m = _HEAD_MARK_RE.match(t)
+        if not m:
+            continue
+        mk = m.group(1)
+        kind = "num" if re.match(r"\d", mk) else "paren" if mk.startswith("(") else "circle" if "①" <= mk[0] <= "⑳" \
+            else "hangul" if re.match(r"[가-하]", mk) else mk
+        runs = [r for r in p.iter(qn("w:r")) if "".join(x.text or "" for x in r.findall(qn("w:t"))).strip()]
+        if not runs:
+            continue
+        szs = [int(s.get(qn("w:val"))) for s in p.iter(qn("w:sz")) if (s.get(qn("w:val")) or "").isdigit()]
+        size = round(max(szs) / 2) if szs else 0
+        nb = nl = 0
+        for r in runs:
+            rf = r.find(f"{qn('w:rPr')}/{qn('w:rFonts')}")
+            name = (rf.get(qn("w:eastAsia")) or rf.get(qn("w:ascii")) or "") if rf is not None else ""
+            k = len("".join(x.text or "" for x in r.findall(qn("w:t"))).strip())
+            if name == FONT_BOLD:
+                nb += k
+            elif name == FONT_LIGHT:
+                nl += k
+        groups.setdefault((kind, size), []).append((p, runs, nb >= nl and nb > 0))
+    n = 0
+    for items in groups.values():
+        if len(items) < 2 or len({b for _, _, b in items}) < 2:
+            continue
+        bold = sum(1 for *_, b in items if b) * 2 >= len(items)
+        for p, runs, b in items:
+            if b == bold:
+                continue
+            for r in runs:
+                rpr = _first_child(r, "rPr")
+                rf = rpr.find(qn("w:rFonts"))
+                cur = (rf.get(qn("w:ascii")) or "").lower() if rf is not None else ""
+                if cur in SYMBOL_FONTS:
+                    continue
+                _font_weight(rpr, bold)
+            n += 1
+    return n
+
+
+def fit_tokens_in_cells(doc):
+    """칸 안 '띄어쓰기 없는 한 덩어리' 글(숫자 15,053.07 등)이 칸 폭보다 넓으면 글자를 조금 줄여 한 줄에.
+    ★굵은 글꼴(ExtraBold)이 원본보다 넓어 '15,053.0 / 7' 처럼 숫자 중간에서 줄이 꺾였다(이천 공급개요 합계, 2026-10-26).
+    최저 6.5pt. 바꾼 문단 수."""
+    import pdf_input as _pi
+    n = 0
+    for tc in doc.element.body.iter(qn("w:tc")):
+        w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+        try:
+            cw = int(w.get(qn("w:w"))) / 20
+        except (TypeError, ValueError, AttributeError):
+            continue
+        mar = tc.find(f"{qn('w:tcPr')}/{qn('w:tcMar')}")
+        pad = sum(int(m.get(qn("w:w"))) / 20 for m in mar if (m.get(qn("w:w")) or "").isdigit()
+                  and etree.QName(m).localname in ("left", "right", "start", "end")) if mar is not None else 10.8
+        avail = cw - pad - 1.5
+        for p in tc.findall(qn("w:p")):
+            t = _vis_text(p).strip()
+            if not t or " " in t or len(t) < 4 or avail <= 10:
+                continue
+            l, fl, hg = _pi._ind_vals(p)
+            room = avail - max(l + fl - hg, 0) / 20
+            used = sum(_pi._run_w_pt(r) for r in p.iter(qn("w:r"))) * 1.1   # 워드가 그리는 폭이 표 어림보다 조금 넓다(실측)
+            if used <= room:
+                continue
+            f = room / used
+            for sz in p.iter(qn("w:sz"), qn("w:szCs")):
+                v = sz.get(qn("w:val"))
+                if v and v.isdigit():
+                    sz.set(qn("w:val"), str(max(13, int(int(v) * f))))
+            n += 1
+    return n
+
+
 def flatten_empty_cells(doc):
     """글 없는 칸의 빈 문단은 줄 높이를 거의 0 으로 — 칸 높이를 밀어 올리지 않게.
     ★빈 문단에 간격이 안 적혀 있으면 스타일 기본값(뒤 간격 + 1.5배 줄)이 들어가 그 줄 전체가 원본의 두 배로 커졌다
@@ -2205,6 +2299,10 @@ def paint_label_columns(doc):
         ncol = max(len(r) for r in grid)
         # (2026-10-21 '구분' 첫 열 전체 칠하기는 뺐다 — 사용자: 원본에서 흰 첫 열('사업진행현황'·'입지도')까지 칠하면 안 됨.
         #   네이비는 머리글 줄 + 원본에서 색이 칠해진 항목 칸(아래 규칙)만, 나머지는 원본 그대로)
+        # ★머리글 줄('구분|내용')이 있는 표는 항목 열을 칠하지 않는다 — 원본 색 그대로(2026-10-26 사용자: 롯데 '위치도·분석 상세'
+        #   회색 칸까지 네이비로 칠함). 머리글 줄 없이 항목 칸이 머리글 노릇을 하는 표(관계사·회사소개 '단체명|…|조합장|…')만 칠한다.
+        if grid and grid[0] and all(_fill(tc) == NAVY for tc in grid[0] if tc is not None):
+            continue
         body_rows = [r for r in grid if not all(_fill(tc) == NAVY for tc in r if tc is not None)]
         if len(body_rows) < 2:
             continue
@@ -2895,6 +2993,32 @@ def restructure_sections(doc, bond_els, bond_head, sub, diagram_png, has_highlig
     for k, (p, kind, m) in enumerate(rest):
         _set_heading_text(p, m.end(3), m.group(1) + _fmt_num(kind, m.group(2), k + 3) + m.group(3), m.group(4).strip())
     rep["금융 소제목"] = 2 + len(rest)
+    # ★사모사채 개요는 늘 새 쪽에서(2026-10-26 사용자) — 하이라이트와 다음 대단원이 한 쪽에 있어 개요를 그 대단원 앞으로
+    #   옮긴 경우(대전·등촌)에도 하이라이트 쪽에 붙지 않게, 바로 앞 문단에 '구역 나누기(새 쪽)' 를 단다.
+    el0 = next((x for x in bond_els if x.getparent() is body), None)
+    if el0 is not None:
+        prev = el0.getprevious()
+        if prev is not None and not (prev.tag == qn("w:p") and prev.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None):
+            hold = el0
+            while hold is not None and not (hold.tag == qn("w:sectPr") or (hold.tag == qn("w:p") and
+                                            hold.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None)):
+                hold = hold.getnext()
+            if hold is not None:
+                sp_src = hold if hold.tag == qn("w:sectPr") else hold.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+                sp_new = copy.deepcopy(sp_src)
+                ty_ = sp_new.find(qn("w:type"))                 # 앞 구역(하이라이트) 은 원래 어떻게 시작했는지 모름 → 새 쪽 기본
+                if ty_ is not None:
+                    sp_new.remove(ty_)
+                if prev.tag == qn("w:p") and prev.find(".//" + qn("w:drawing")) is None:
+                    _first_child(prev, "pPr").append(sp_new)
+                else:
+                    brk = etree.Element(qn("w:p"))
+                    etree.SubElement(brk, qn("w:pPr")).append(sp_new)
+                    el0.addprevious(brk)
+                t2 = sp_src.find(qn("w:type"))                  # 개요 쪽 구역은 새 쪽에서 시작
+                if t2 is not None and t2.get(qn("w:val")) == "continuous":
+                    sp_src.remove(t2)
+                rep["개요 새 쪽"] = True
     # (2026-10-21) '다음과 같이 두기'·'앞에서 쪽 나누기' 는 쓰지 않는다 — 워드 편집 기호 보기에서 문단 앞에 ■ 표시가 떠
     #   사용자가 '글머리 같은 게 왜 있냐'. 개요가 하이라이트 쪽에 붙을지는 bond_place 가 구조도 높이까지 넣어 정하고,
     #   금융조건 앞 쪽 나눔은 '구역 나누기' 로.
@@ -3097,6 +3221,8 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep["고정 줄 높이 풀기"] = loosen_exact_rows(doc)
     rep["정렬 똑바로"] = straighten_alignment(doc)
     rep["빈 칸 높이 0"] = flatten_empty_cells(doc)
+    rep["소제목 굵기 통일"] = unify_heading_weights(doc)
+    rep["칸 안 숫자 한 줄로"] = fit_tokens_in_cells(doc)
     rep["표지 상자 맞춤"] = fit_cover_boxes(doc)
     rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)

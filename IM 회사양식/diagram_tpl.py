@@ -93,6 +93,12 @@ def build(no, values, removed=None):
     return pptx, png, err
 
 
+def build_pptx(no, values, removed, path):
+    """채운 구조도 한 장짜리 PPT 만 path 에 만든다(사람이 파워포인트로 열어 상자를 더하고 고치는 용 — 2026-10-26 사용자)."""
+    _dg().build_diagram(no, values, path, removed=set(removed or ()))
+    return path
+
+
 def pptx_to_png(pptx_bytes):
     """사람이 고쳐 올린 구조도 PPT → 잘라 낸 사진."""
     dg, eb = _dg(), _eb()

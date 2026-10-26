@@ -50,6 +50,18 @@ def _page_art(page):
     lines, fills = [], []
     for dr in page.get_drawings():
         dashed = bool(dr.get("dashes")) and dr.get("dashes") not in ("[] 0", "[]0", "[] 0.0")
+        if dashed:
+            # ★아주 촘촘한 점선(점·틈 1pt 이하 — 롯데 '자금용도 상세' 안쪽 표 '[.48 .48]')은 종이에선 가는 회색 실선으로 보인다.
+            #   워드엔 그만큼 촘촘한 점선이 없어 굵은 점선으로 그려져 칸이 떨어진 것처럼 보였다(2026-10-26 사용자)
+            #   → 실선 + 그 비율만큼 옅은 색으로.
+            nums = [float(x) for x in re.findall(r"[\d.]+", (dr.get("dashes") or "").split("]")[0]) if x != "."]
+            if nums and max(nums) <= 1.2:
+                dashed = False
+                on = nums[0] / max(sum(nums[:2]) if len(nums) > 1 else nums[0] * 2, 0.01)
+                for key in ("color", "fill"):
+                    c = dr.get(key)
+                    if c:
+                        dr[key] = tuple(1 - (1 - v) * on for v in c)
         for it in dr["items"]:
             if it[0] == "re":
                 r = fitz.Rect(it[1])
@@ -59,10 +71,12 @@ def _page_art(page):
                 r = it[1].rect
             else:
                 continue
-            if dr.get("fill") is not None and r.width > 2.5 and r.height > 2.5:
+            # ★선 굵기 한도 1.6 → 3.0pt: 롯데 민감도 표 빨간 강조 네모(2.2pt 칠한 막대)가 선으로도 칠로도 안 잡혀
+            #   그 칸 경계가 사라지고 4.25·4.50·4.75 세 열이 한 칸으로 합쳐졌다(2026-10-26)
+            if dr.get("fill") is not None and r.width > 3.0 and r.height > 3.0:
                 fills.append((r, _hex(dr["fill"])))
             thin = min(r.width, r.height)
-            if dr.get("fill") is not None and thin <= 1.6 and max(r.width, r.height) >= 2:
+            if dr.get("fill") is not None and thin <= 3.0 and max(r.width, r.height) >= 2:
                 lines.append((r, _hex(dr["fill"]), max(thin, 0.25), dashed))
             elif dr.get("color") is not None and (it[0] == "l" or dr.get("fill") is None):
                 w = max(dr.get("width") or 0.5, 0.25)
@@ -283,7 +297,9 @@ def _align(par, cell):
         return ("both" if len(par) >= 2 else "left"), min(lg)
     if all(abs(a - b) < max(3, cell.width * 0.04) for a, b in zip(lg, rg)) and min(lg) > 2:
         return "center", 0
-    if all(b < 6 for b in rg) and min(lg) > 8:
+    # 오른쪽 여백이 왼쪽보다 훨씬 작으면 오른쪽 맞춤(숫자 칸 — 원본 안쪽 여백이 6~10pt 라 '6 미만' 만 보면
+    #   롯데 민감도 표 숫자가 왼쪽으로 붙었다, 2026-10-26)
+    if all(b < 12 and a > b * 2.5 for a, b in zip(lg, rg)) and min(lg) > 8:
         return "right", 0
     return "left", min(lg)
 
@@ -675,6 +691,19 @@ def _cells_from_segs(segs, box):
     ys = _cluster([box.y0, box.y1] + [_mid(r, o) for r, o, _ in segs if o == "h"])
     xs = [x for x in xs if box.x0 - 2 <= x <= box.x1 + 2]
     ys = [y for y in ys if box.y0 - 2 <= y <= box.y1 + 2]
+
+    def _no_sliver(vals):
+        # ★칠한 네모 가장자리와 선이 1~2pt 어긋나면 그 틈이 '글 없는 납작한 줄·열' 이 되어 표가 겹쳐 보였다
+        #   (롯데 운영비용 가정: 맨 위 빈 줄 → 머리글 둘째 줄을 머리글로 못 봄, 2026-10-26) → 2.5pt 안 선은 하나로
+        out = []
+        for v in vals:
+            if out and v - out[-1] < 2.5:
+                if v == vals[-1]:
+                    out[-1] = v                                # 바깥 끝은 남긴다
+                continue
+            out.append(v)
+        return out
+    xs, ys = _no_sliver(xs), _no_sliver(ys)
     vs = [(r, _mid(r, "v")) for r, o, _ in segs if o == "v"]
     hs = [(r, _mid(r, "h")) for r, o, _ in segs if o == "h"]
 

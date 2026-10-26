@@ -17,10 +17,13 @@
 """
 import os
 import re
+import tempfile
 
 import streamlit as st
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in __import__("sys").path:                   # diagram_tpl 등 이 폴더 모듈(혼자 돌릴 때도)
+    __import__("sys").path.insert(0, HERE)
 STEP_NAMES = ["원본 올리기", "표지", "사모사채 개요", "금융 구조도", "만들기"]
 BOND_ROWS = ["사모사채명", "사채유형", "발행인", "기초자산", "발행금액",
              "발행일", "만기일", "금융조건", "이자지급주기"]
@@ -121,7 +124,7 @@ def _prepare(name, data):
         if str(k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
             SS.pop(k, None)
     for k in ("cf_photo_custom", "cf_out", "cf_rep", "cf_build_err", "cf_fname", "cf_thumbs", "cf_edge_pages",
-              "cf_dg_no", "cf_diag_err"):
+              "cf_dg_no", "cf_diag_err", "cf_dg_ppt_png", "cf_dg_ppt_no", "cf_dg_ppt_src", "cf_dg_ppt_opened"):
         SS.pop(k, None)
 
 
@@ -405,7 +408,7 @@ elif step == 4:
                              use_container_width=True, help="이 구조도로 만들기"):
                     SS["cf_dg_no"] = _d["no"]
                     for _k in list(SS.keys()):
-                        if str(_k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_")):
+                        if str(_k).startswith(("cf_dv_", "cf_dx_", "w_cf_dv_", "w_cf_dx_", "cf_dg_ppt_")):
                             SS.pop(_k, None)
                     st.rerun()
 
@@ -450,8 +453,81 @@ elif step == 4:
                                            help="이 항목을 그림에서 아예 없앱니다")
 
 
+            # ── ③ PPT 로 직접 고치기(선택) — 2026-10-26 사용자: 칸 채우기로는 상자를 더할 수 없다 ──
+            st.markdown("---")
+            st.markdown("#### ③ 상자를 더하거나 모양을 바꾸려면 — PPT 로 직접 고치기 (선택)")
+            st.caption("위 칸 채우기는 **글자만** 바꿀 수 있습니다. 상자를 하나 더 넣거나 화살표·위치를 바꾸고 싶으면 "
+                       "이 구조도를 파워포인트로 열어 직접 고치세요. 순서: ⓐ 'PPT 열기' → 파워포인트에서 고치고 **저장(Ctrl+S)** "
+                       "→ ⓑ '고친 PPT 로 업데이트'. 위 칸에 채운 글자는 PPT 에 미리 들어가 있습니다. "
+                       "업데이트하면 칸 채운 값 대신 **고친 PPT 그대로** 결과에 들어갑니다.")
+            _vals = {f["key"]: SS.get(f"cf_dv_{_no}_{f['key']}", f["text"]) for f in _d["fields"]}
+            _rm = {f["key"] for f in _d["fields"] if SS.get(f"cf_dx_{_no}_{f['key']}")}
+            _LOCAL = os.name == "nt"                          # 내 PC(윈도우) = 파워포인트로 바로 열기 / 웹 = 내려받기·올리기
+            _edit_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "산출물", "구조도_편집")
+            _edit_path = os.path.join(_edit_dir, f"금융구조도_{_no}.pptx")
+            _b1, _b2, _b3 = st.columns(3)
+            if _LOCAL:
+                if _b1.button("ⓐ 📝 PPT 열기", use_container_width=True, key="w_cf_dg_open",
+                              help="지금 채운 글자로 구조도 PPT 를 만들어 파워포인트로 엽니다"):
+                    try:
+                        os.makedirs(_edit_dir, exist_ok=True)
+                        if not (SS.get("cf_dg_ppt_opened") == _no and os.path.exists(_edit_path)):
+                            _dt.build_pptx(_no, _vals, _rm, _edit_path)   # 이미 열어 고치던 게 있으면 덮어쓰지 않는다
+                        os.startfile(_edit_path)
+                        SS["cf_dg_ppt_opened"] = _no
+                    except Exception as e:
+                        st.error(f"PPT 를 열지 못했습니다 — {e}")
+                if _b2.button("ⓑ 🔄 고친 PPT 로 업데이트", use_container_width=True, key="w_cf_dg_upd",
+                              disabled=not os.path.exists(_edit_path),
+                              help="파워포인트에서 저장한 뒤 누르세요 — 저장한 그대로 구조도로 씁니다"):
+                    try:
+                        with open(_edit_path, "rb") as _fh:
+                            _pb = _fh.read()
+                        _png, _err = _dt.pptx_to_png(_pb)
+                        if _png:
+                            SS["cf_dg_ppt_png"], SS["cf_dg_ppt_no"] = _png, _no
+                        else:
+                            st.error(f"고친 PPT 를 그림으로 바꾸지 못했습니다 — {_err}")
+                    except Exception as e:
+                        st.error(f"고친 PPT 를 읽지 못했습니다 — {e}")
+                if _b3.button("↩ 처음 틀로 다시", use_container_width=True, key="w_cf_dg_reset",
+                              help="고친 PPT 를 버리고, 위 칸 채운 값으로 새로 만듭니다"):
+                    SS.pop("cf_dg_ppt_png", None)
+                    SS.pop("cf_dg_ppt_no", None)
+                    SS.pop("cf_dg_ppt_opened", None)
+                    try:
+                        os.remove(_edit_path)
+                    except OSError:
+                        pass
+                    st.rerun()
+            else:
+                try:
+                    _tmp = os.path.join(tempfile.mkdtemp(), f"금융구조도_{_no}.pptx")
+                    _dt.build_pptx(_no, _vals, _rm, _tmp)
+                    with open(_tmp, "rb") as _fh:
+                        _b1.download_button("ⓐ 📥 PPT 내려받기", _fh.read(), file_name=f"금융구조도_{_no}.pptx",
+                                            use_container_width=True, key="w_cf_dg_dl")
+                except Exception as e:
+                    _b1.error(f"PPT 를 만들지 못했습니다 — {e}")
+                _up = _b2.file_uploader("ⓑ 고친 PPT 올리기", type=["pptx"], key="w_cf_dg_up")
+                if _up is not None and SS.get("cf_dg_ppt_src") != (_up.name, _up.size):
+                    _png, _err = _dt.pptx_to_png(_up.getvalue())
+                    if _png:
+                        SS["cf_dg_ppt_png"], SS["cf_dg_ppt_no"] = _png, _no
+                        SS["cf_dg_ppt_src"] = (_up.name, _up.size)
+                    else:
+                        st.error(f"올린 PPT 를 그림으로 바꾸지 못했습니다 — {_err}")
+                if _b3.button("↩ 처음 틀로 다시", use_container_width=True, key="w_cf_dg_reset"):
+                    for _k in ("cf_dg_ppt_png", "cf_dg_ppt_no", "cf_dg_ppt_src"):
+                        SS.pop(_k, None)
+                    st.rerun()
+            if SS.get("cf_dg_ppt_png") and SS.get("cf_dg_ppt_no") == _no:
+                st.image(SS["cf_dg_ppt_png"], caption="✅ 고친 PPT 로 만든 구조도 — 결과에 이 그림이 들어갑니다", use_container_width=True)
+
         if _d:
-            st.success(f"구조도 '{_d['title']}' 을(를) 골랐습니다 — **5단계 '만들기' 를 누를 때 지금 채운 값으로 만들어** "
+            _how = ("**고친 PPT 그대로**" if SS.get("cf_dg_ppt_png") and SS.get("cf_dg_ppt_no") == _d["no"]
+                    else "**5단계 '만들기' 를 누를 때 지금 채운 값으로 만들어**")
+            st.success(f"구조도 '{_d['title']}' 을(를) 골랐습니다 — {_how} "
                        "'금융 개요 > 1. 금융 구조도' 자리에 넣습니다.")
         else:
             st.warning("아직 구조도를 고르지 않았습니다. 구조도는 항상 들어가므로 위에서 하나 골라야 다음 단계로 갈 수 있습니다.")
@@ -565,7 +641,9 @@ elif step == 5:
                                                drop_last=SS.get("cf_drop_tail", False), progress=_prog)
                 _prog(0.97, "금융 구조도 그리는 중…")
                 _diag_png = None
-                if SS.get("cf_dg_no"):                       # 4단계에서 고른 틀 + 채운 값으로 지금 만든다(미리보기 없음)
+                if SS.get("cf_dg_no") and SS.get("cf_dg_ppt_png") and SS.get("cf_dg_ppt_no") == SS["cf_dg_no"]:
+                    _diag_png = SS["cf_dg_ppt_png"]          # 4단계 ③ 에서 파워포인트로 직접 고친 구조도
+                elif SS.get("cf_dg_no"):                     # 4단계에서 고른 틀 + 채운 값으로 지금 만든다(미리보기 없음)
                     import diagram_tpl as _dt
                     _L = next((x for x in _dt.layouts() if x["no"] == SS["cf_dg_no"]), None)
                     if _L:
