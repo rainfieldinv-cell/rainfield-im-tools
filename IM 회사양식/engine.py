@@ -2243,6 +2243,42 @@ def fit_tokens_in_cells(doc):
     return n
 
 
+def fit_cell_pictures(doc):
+    """칸 안 그림이 칸 안쪽 폭보다 넓으면 비율 그대로 줄인다(자르지 않음).
+    ★고산 지구단위계획 결정도: 그림이 칸 테두리 밖으로 삐져나왔다(2026-10-27 사용자). 바꾼 그림 수."""
+    WPd = "{%s}" % NS["wp"]
+    A_ = "{%s}" % NS["a"]
+    n = 0
+    for tc in doc.element.body.iter(qn("w:tc")):
+        w = tc.find(f"{qn('w:tcPr')}/{qn('w:tcW')}")
+        try:
+            cw = int(w.get(qn("w:w")))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        mar = tc.find(f"{qn('w:tcPr')}/{qn('w:tcMar')}")
+        pad = sum(int(m.get(qn("w:w"))) for m in mar if (m.get(qn("w:w")) or "").isdigit()
+                  and etree.QName(m).localname in ("left", "right", "start", "end")) if mar is not None else 216
+        inner = (cw - pad - 40) * 635                      # twips → EMU
+        for inl in tc.iter(WPd + "inline"):
+            if any(a.tag == qn("w:tc") and a is not tc for a in inl.iterancestors() if tc in a.iterancestors()):
+                continue                                     # 안쪽 표 칸이 따로 맞춘다
+            ext = inl.find(WPd + "extent")
+            try:
+                cx, cy = int(ext.get("cx")), int(ext.get("cy"))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if inner > 0 and cx > inner:
+                f = inner / cx
+                ext.set("cx", str(int(cx * f)))
+                ext.set("cy", str(int(cy * f)))
+                for x in inl.iter(A_ + "ext"):
+                    if x.getparent() is not None and etree.QName(x.getparent()).localname == "xfrm":
+                        x.set("cx", str(int(int(x.get("cx")) * f)))
+                        x.set("cy", str(int(int(x.get("cy")) * f)))
+                n += 1
+    return n
+
+
 def flatten_empty_cells(doc):
     """글 없는 칸의 빈 문단은 줄 높이를 거의 0 으로 — 칸 높이를 밀어 올리지 않게.
     ★빈 문단에 간격이 안 적혀 있으면 스타일 기본값(뒤 간격 + 1.5배 줄)이 들어가 그 줄 전체가 원본의 두 배로 커졌다
@@ -3223,6 +3259,7 @@ def build(src_bytes, *, title_lines, header_text, date_text, photo, bond, bond_p
     rep["빈 칸 높이 0"] = flatten_empty_cells(doc)
     rep["소제목 굵기 통일"] = unify_heading_weights(doc)
     rep["칸 안 숫자 한 줄로"] = fit_tokens_in_cells(doc)
+    rep["칸 안 그림 칸 폭에"] = fit_cell_pictures(doc)
     rep["표지 상자 맞춤"] = fit_cover_boxes(doc)
     rep["표 머리말 줄에 맞춤"] = align_tables_to_body(doc)
     _renumber_shapes(doc)

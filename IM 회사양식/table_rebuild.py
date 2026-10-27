@@ -657,6 +657,17 @@ def _split_islands(segs, box, avoid=()):
             nfx = len(_cluster([_mid(r, "v") for r, o, _ in fvs]))
             if nfx <= 1 and abs(R.x0 - xl) < 2.5 and abs(R.x1 - xr) < 2.5:
                 continue                                       # 칸 폭 꽉 찬 세로줄 하나 = 몇 줄만 나뉜 합친 칸(고산 공급개요 '아파트|84A')
+            # ★바깥 칸 폭(xl~xr)을 꽉 채우고 가로선이 모두 바깥 표 칸 줄과 같은 높이·같은 시작이면 안쪽 표가 아니라 바깥 칸을 더 나눈 것
+            #   (고산 Appendix 차주사 개요 '대표자|TBD|설립일자|TBD' — 안쪽 표로 빼면서 경계 가로선까지 빼 소재지 칸이 4줄 합쳐졌다, 2026-10-27)
+            full = abs(R.x0 - xl) < 2.5 and abs(R.x1 - xr) < 2.5
+            # 바깥 줄 경계 = 표 왼쪽 끝에서 시작해 이 칸 왼쪽 선까지 이어지는 가로선(다른 안쪽 표 선은 빼고)
+            row_ys = _cluster([_mid(r, "h") for r, o, real in hs if real and r.x0 <= box.x0 + 3 and r.x1 >= xl - 3])
+            if full and row_ys:
+                inner_ys = _cluster([_mid(r, o) for r, o, real in comp if o == "h" and real])
+                # 안쪽 세로선이 바깥 줄 경계를 넘어 이어지면 진짜 안쪽 표(이천 중도금 일정표) — 줄마다 끊기면 바깥 칸 나눔(고산 Appendix)
+                crosses = any(any(r.y0 + TOL < z < r.y1 - TOL for z in row_ys) for r, o, _ in fvs)
+                if not crosses and all(any(abs(y - z) <= TOL for z in row_ys) for y in inner_ys):
+                    continue
             if R.height > 8 and R.width > 20:
                 regions.append(R)
     if not regions:
@@ -698,6 +709,8 @@ def _cells_from_segs(segs, box):
     reals_v = [_mid(r, o) for r, o, real in segs if o == "v" and real]
     reals_h = [_mid(r, o) for r, o, real in segs if o == "h" and real]
 
+    real_segs = [(r, o) for r, o, real in segs if real]
+
     def keep(seg):                                   # 칠 가장자리는 진짜 선 자리와 맞을 때만, 그 선 자리로 붙인다
         r, o, real = seg
         if real:
@@ -705,6 +718,20 @@ def _cells_from_segs(segs, box):
         m = _mid(r, o)
         near = [v for v in (reals_v if o == "v" else reals_h) if abs(m - v) <= TOL]
         if not near:
+            return None
+        # ★그 높이(자리)의 진짜 선이 이 칠 가장자리 구간 근처에 실제로 있어야 — 다른 열에만 있는 선에 붙이면
+        #   선 없는 칸(고산 실거래 '구분', 세로 합친 칸)이 글자 바탕 네모 때문에 쪼개졌다(2026-10-27)
+        v0 = min(near, key=lambda q: abs(q - m))
+        lo, hi = (r.x0, r.x1) if o == "h" else (r.y0, r.y1)
+        hit = False
+        for rr, oo in real_segs:
+            if oo != o or abs(_mid(rr, oo) - v0) > TOL:
+                continue
+            a, b = (rr.x0, rr.x1) if o == "h" else (rr.y0, rr.y1)
+            if min(b, hi) - max(a, lo) > (hi - lo) * 0.3 or (a - 3 <= lo and b + 3 >= hi):
+                hit = True
+                break
+        if not hit:
             return None
         v = min(near, key=lambda q: abs(q - m))
         return ((fitz.Rect(v - 0.2, r.y0, v + 0.2, r.y1) if o == "v" else fitz.Rect(r.x0, v - 0.2, r.x1, v + 0.2)),

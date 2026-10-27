@@ -986,6 +986,7 @@ def convert(pdf_bytes, drop_cover=True, drop_last=None, progress=None, drop_page
         page_info.insert(idx, {"원본쪽": k + 1, "비율": None, "높이": used, "그림": True})
     rep["쪽"] = page_info
     rep["그림으로 넣은 쪽"] = [k + 1 for k in sorted(ignored)]
+    rep["쪽 경계 표 이어 붙임"] = merge_page_continued_tables(d)
     out = io.BytesIO()
     d.save(out)
     return out.getvalue(), rep
@@ -2065,6 +2066,12 @@ def even_cell_margins(d):
                 if int(float(e.get(qn("w:w")) or 0)) < 85:
                     e.set(qn("w:w"), "85")
                     e.set(qn("w:type"), "dxa")
+            # 위·아래가 같게 보이도록 첫 문단 위 간격·마지막 문단 아래 간격은 0(칸 여백으로만 띄움 — 고산 실거래 상자, 2026-10-27)
+            txt_ps = [p for p in ps if _par_text(p).strip()]
+            for p_, side in ((txt_ps[0], "before"), (txt_ps[-1], "after")) if txt_ps else ():
+                sp_ = p_.find(f"{qn('w:pPr')}/{qn('w:spacing')}")
+                if sp_ is not None:
+                    sp_.set(qn("w:" + side), "0")
 
         def jcv(p):
             jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
@@ -3252,7 +3259,8 @@ def _fit_page(secs, grps, box, lines=None):
     #   부풀려 셌고, 그림이 커지며 쪽 끝 표 줄이 넘쳤다(내곡동 59→61쪽, 2026-10-20) → 빼고, 어림 오차 몫으로 절반만 쓴다
     #   + 어림 오차 몫으로 쪽 높이 5% 는 남겨 둔다(그림이 6pt 만 커져도 꽉 찬 쪽 끝 각주가 넘쳤다 — 내곡 31쪽)
     #   + 9pt 로 다시 커지는 몫(used 에 포함)도 빼야 한다 — 빼먹어 내곡 29쪽이 183pt 남는다고 셌다
-    grow_pictures_to_width(grps, 0.5 * max(0.0, BOX_H_PT * (HEIGHT_SAFETY - 0.05) - used))
+    # (2026-10-27 사용자: 실거래 사례 위치도가 원본보다 작다 — 너무 조심) 남는 높이의 절반 → 80%
+    grow_pictures_to_width(grps, 0.8 * max(0.0, BOX_H_PT * (HEIGHT_SAFETY - 0.05) - used))
     if big is not None:
         paginate_big_table(grps, big)
     for grp in grps:                                         # 워드가 스스로 쪽을 넘겨도 머리글이 다음 쪽에 반복되게(■ 표시 안 생김)
@@ -3288,7 +3296,7 @@ def _header_rows(tbl):
         return 0
     f0, k0, n0 = dom(rows[0])
     if not f0 or k0 < 0.6 * n0:
-        return 1
+        return 0                                           # 칠하지 않은 첫 줄은 머리글 아님(고산 '연체이율' 줄이 머리글로 칠해졌다)
     n = 1
     for tr in rows[1:3]:
         f, k, m = dom(tr)
@@ -3300,18 +3308,19 @@ def _header_rows(tbl):
 
 
 def paginate_big_table(grps, tbl):
-    """한 쪽에 안 들어가는 표를 쪽마다 나눈다(2026-10-26 사용자 확정 규칙).
-    ① 표 앞에 다른 내용이 있으면 표를 통째로 다음 쪽에서 시작(쪽 나눔 줄 — ■ 표시가 안 생기는 줄바꿈 쪽 나눔).
-    ② 그래도 넘치면 **항목 단위**(세로로 합친 칸 묶음 중간은 안 자름)로 표를 나누고 다음 표 맨 위에 머리글 줄을 똑같이 복사.
-    ③ 어림이 빗나가 워드가 더 나누더라도 머리글은 반복(tblHeader)하고 줄은 안 쪼개지게(cantSplit).
-    나눈 표 수."""
-    import copy
+    """한 쪽에 안 들어가는 큰 표(2026-10-26·27 사용자 확정).
+    ① 표 앞에 다른 내용이 있으면 표(+바로 위 짧은 제목·단위 줄)를 다음 쪽에서 시작(줄바꿈 쪽 나눔 — ■ 표시 없음).
+    ② 표는 **하나로 이어서** 흐르게 둔다 — 워드가 쪽을 넘기고 머리글 줄은 다음 쪽 맨 위에 반복(tblHeader), 줄은 안 쪼갬(cantSplit).
+    ★2026-10-27: 예전엔 어림으로 표를 직접 여러 표로 잘랐더니 어림이 빗나가 두세 줄짜리 조각이 쪽마다 생겼다(고산 담보필지목록)."""
     from docx.oxml.ns import qn
     body_els = [el for grp in grps for el in grp]
     before = body_els[:body_els.index(tbl)] if tbl in body_els else []
-    # 표 바로 위 짧은 제목·단위 줄('2. 공동주택 개발사업 개요', '(단위: 천원)')은 표와 같이 다음 쪽으로(제목만 덩그러니 남았다, 내곡 17쪽)
+    def caption(el):                                         # 표 제목·단위 줄(문단 또는 1줄짜리 제목 표 — 고산 '■ 담보필지목록')
+        if el.find(".//" + qn("w:drawing")) is not None or len(_par_text(el).strip()) > 80:
+            return False
+        return el.tag == qn("w:p") or (el.tag == qn("w:tbl") and len(el.findall(qn("w:tr"))) == 1)
     k = len(before)
-    while k > 0 and before[k - 1].tag == qn("w:p") and before[k - 1].find(".//" + qn("w:drawing")) is None and             len(_par_text(before[k - 1]).strip()) <= 40 and len(before) - k < 4:
+    while k > 0 and caption(before[k - 1]) and len(before) - k < 4:
         k -= 1
     lead = before[k] if k < len(before) else tbl
     if any(el.tag == qn("w:tbl") or (el.tag == qn("w:p") and (_par_text(el).strip() or
@@ -3320,28 +3329,15 @@ def paginate_big_table(grps, tbl):
         r = etree_sub(brk, "w:r")
         etree_sub(r, "w:br", {qn("w:type"): "page"})
         lead.addprevious(brk)
-    rows = tbl.findall(qn("w:tr"))
+    _mark_rows(tbl)
+    return 0
+
+
+def _mark_rows(tbl):
+    """머리글 줄은 다음 쪽에 반복, 줄은 쪽 경계에서 안 쪼갬."""
+    from docx.oxml.ns import qn
     nh = _header_rows(tbl)
-    if nh == 0:
-        # ★원본에서 앞 쪽 표가 이어지는 쪽(머리글 없음 — 내곡 분양가 테이블 2~5쪽): 바로 앞의 같은 모양 표(열 수 같음) 머리글을
-        #   가져와 맨 위에 붙인다 — 머리글 없이 항목만 있으면 무엇이 구분·내용인지 모른다(2026-10-26 사용자)
-        ncol = len(tbl.findall(f"{qn('w:tblGrid')}/{qn('w:gridCol')}"))
-        prev = tbl.getprevious()
-        while prev is not None:
-            if prev.tag == qn("w:tbl") and len(prev.findall(f"{qn('w:tblGrid')}/{qn('w:gridCol')}")) == ncol:
-                k = _header_rows(prev)
-                if k:
-                    for h in reversed(prev.findall(qn("w:tr"))[:k]):
-                        rows[0].addprevious(copy.deepcopy(h))
-                    rows = tbl.findall(qn("w:tr"))
-                    nh = k
-                    break
-                prev = prev.getprevious()                    # 그 표도 이어진 표면 더 앞으로
-                continue
-            if prev.tag == qn("w:tbl"):
-                break                                        # 모양이 다른 표가 끼면 그만
-            prev = prev.getprevious()
-    for i, tr in enumerate(rows):
+    for i, tr in enumerate(tbl.findall(qn("w:tr"))):
         trpr = tr.find(qn("w:trPr"))
         if trpr is None:
             trpr = tr.makeelement(qn("w:trPr"), {})
@@ -3351,46 +3347,64 @@ def paginate_big_table(grps, tbl):
         if i < nh and trpr.find(qn("w:tblHeader")) is None:
             trpr.append(trpr.makeelement(qn("w:tblHeader"), {}))
 
-    def boundary(tr):                                       # 이 줄에서 새 쪽을 시작해도 되나(세로 합친 칸 이어지는 줄이면 안 됨)
-        for tc in tr.findall(qn("w:tc")):
-            vm = tc.find(f"{qn('w:tcPr')}/{qn('w:vMerge')}")
-            if vm is not None and vm.get(qn("w:val")) in (None, "continue"):
-                return False
-        return True
-    hs = [_row_actual(tr, 1.0) for tr in rows]
-    page = BOX_H_PT * HEIGHT_SAFETY * 0.92                 # 어림 오차 몫
-    head_h = sum(hs[:nh])
-    cuts, acc, last_b = [], head_h, None
-    start = nh
-    for i in range(nh, len(rows)):
-        if boundary(rows[i]) and i > start:
-            last_b = i
-        if acc + hs[i] > page and last_b is not None and last_b > start:
-            cuts.append(last_b)
-            start = last_b
-            acc = head_h + sum(hs[last_b:i])
-            last_b = None
-        acc += hs[i]
-    if not cuts:
-        return 0
-    head = rows[:nh]                                       # 머리글 없는 표(nh=0)면 복사하지 않는다
-    prev = tbl
-    bounds = cuts + [len(rows)]
-    for a, b in zip(cuts, bounds[1:]):
-        new = copy.deepcopy(tbl)
-        for tr in new.findall(qn("w:tr")):
-            new.remove(tr)
-        for h in head:
-            new.append(copy.deepcopy(h))
-        for tr in rows[a:b]:
-            new.append(tr)                                  # 원래 표에서 옮긴다
-        brk = tbl.makeelement(qn("w:p"), {})
-        r = etree_sub(brk, "w:r")
-        etree_sub(r, "w:br", {qn("w:type"): "page"})
-        prev.addnext(brk)
-        brk.addnext(new)
-        prev = new
-    return len(cuts)
+
+def merge_page_continued_tables(d):
+    """원본 쪽 경계에서 둘로 나뉜 한 표(앞 쪽 끝 표 + 다음 쪽 첫 표, 열 모양 같고 뒤 표는 머리글 없음)를 하나로 합친다.
+    다음 쪽 구역은 '이어서'(새 쪽 아님)로 — 표가 끊기지 않고 흐르고, 넘어가면 머리글이 반복된다.
+    ★2026-10-27 사용자(고산 금융조건·담보필지목록): 다음 쪽 표 맨 윗줄 '연체이율' 이 머리글처럼 칠해지고, 표가 쪽마다 끊겼다.
+    합친 수."""
+    from docx.oxml.ns import qn
+    body = d.element.body
+
+    def empty(el):
+        return el.tag == qn("w:p") and not _par_text(el).strip() and el.find(".//" + qn("w:drawing")) is None and             el.find(".//" + qn("w:pict")) is None and not any(b.get(qn("w:type")) == "page" for b in el.iter(qn("w:br")))
+
+    def cols(t):
+        return [int(float(g.get(qn("w:w")) or 0)) for g in t.findall(f"{qn('w:tblGrid')}/{qn('w:gridCol')}")]
+
+    def same_shape(a, b):
+        ca, cb = cols(a), cols(b)
+        if len(ca) != len(cb) or not ca:
+            return False
+        ta, tb = sum(ca) or 1, sum(cb) or 1
+        return all(abs(x / ta - y / tb) <= 0.04 for x, y in zip(ca, cb))
+    n = 0
+    for h in list(body.findall(qn("w:p"))):
+        sp = h.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+        if sp is None or h.getparent() is None:
+            continue
+        p = h.getprevious()
+        while p is not None and empty(p):
+            p = p.getprevious()
+        q = h.getnext()
+        while q is not None and empty(q) and q.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is None:
+            q = q.getnext()
+        if p is None or q is None or p.tag != qn("w:tbl") or q.tag != qn("w:tbl") or not same_shape(p, q):
+            continue
+        qrows = q.findall(qn("w:tr"))
+        if _header_rows(q):                                  # 다음 쪽 표가 제 머리글로 시작하면 별개 표(롯데 Appendix 층별계획)
+            continue
+        if not _header_rows(p) and len(p.findall(qn("w:tr"))) < 3:
+            continue                                         # 앞 표가 제목 띠 같은 짧은 표면 안 합침
+        for tr in qrows:
+            p.append(tr)
+        q.getparent().remove(q)
+        nxt = h.getnext()                                    # 다음 쪽 구역 끝 표시 → '이어서'
+        while nxt is not None and not (nxt.tag == qn("w:sectPr") or (nxt.tag == qn("w:p") and
+                                       nxt.find(f"{qn('w:pPr')}/{qn('w:sectPr')}") is not None)):
+            nxt = nxt.getnext()
+        if nxt is not None:
+            sp2 = nxt if nxt.tag == qn("w:sectPr") else nxt.find(f"{qn('w:pPr')}/{qn('w:sectPr')}")
+            ty = sp2.find(qn("w:type"))
+            if ty is None:
+                ty = sp2.makeelement(qn("w:type"), {})
+                refs = [c for c in sp2 if c.tag in (qn("w:headerReference"), qn("w:footerReference"),
+                                                    qn("w:footnotePr"), qn("w:endnotePr"))]
+                (refs[-1].addnext(ty) if refs else sp2.insert(0, ty))
+            ty.set(qn("w:val"), "continuous")
+        _mark_rows(p)
+        n += 1
+    return n
 
 
 def etree_sub(parent, tag, attrs=None):
