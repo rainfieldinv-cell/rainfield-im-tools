@@ -166,6 +166,55 @@ def find_es_pages(pdf_bytes: bytes) -> list:
     return out
 
 
+def _ensure_fonts():
+    """웹(리눅스) 서버에 Pretendard(ExtraBold·Light)를 한 번 등록 — 없으면 LibreOffice 가 다른 글꼴로 바꿔 그려
+    굵은 글씨가 사라지고 글이 넓어져 상자 안에서 꺾였다(2026-10-27 사용자: 고친 구조도 PPT 가 결과에서 달라짐)."""
+    import os as _os, shutil as _sh, subprocess as _sp, glob as _gl
+    if _os.name == "nt":
+        return
+    dst = _os.path.expanduser("~/.fonts")
+    try:
+        _os.makedirs(dst, exist_ok=True)
+        here = _os.path.dirname(_os.path.abspath(__file__))
+        new = False
+        for f in _gl.glob(_os.path.join(here, "..", "*", "fonts", "Pretendard-*.otf")):
+            t = _os.path.join(dst, _os.path.basename(f))
+            if not _os.path.exists(t):
+                _sh.copy(f, t)
+                new = True
+        if new and _sh.which("fc-cache"):
+            _sp.run(["fc-cache", "-f", dst], timeout=120, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    except Exception:
+        pass
+
+
+def _lo_friendly(pptx_path: str) -> str:
+    """LibreOffice 용 사본: 줄바꿈 없는 한 줄 글은 '자동 줄바꿈 안 함', 글자 5% 작게.
+    ★LibreOffice 는 같은 글꼴도 파워포인트보다 조금 넓게 그려 'Tranche A [1,200억 원]' 이 두 줄로 꺾이고
+      아래 상자를 덮었다(사용자 PPT 를 두 프로그램으로 그려 비교해 확인, 2026-10-27)."""
+    import os as _os, re as _re, tempfile as _tf, zipfile as _zf
+    out = _os.path.join(_tf.mkdtemp(prefix="rf_lo_"), "s.pptx")
+    with _zf.ZipFile(pptx_path) as zi, _zf.ZipFile(out, "w", _zf.ZIP_DEFLATED) as zo:
+        for item in zi.infolist():
+            data = zi.read(item.filename)
+            if _re.match(r"ppt/slides/slide\d+\.xml$", item.filename):
+                x = data.decode("utf-8")
+
+                def one(m):
+                    body = m.group(0)
+                    paras = _re.findall(r"<a:p>|<a:p ", body)
+                    if len(paras) <= 1 and "<a:br" not in body:
+                        body = _re.sub(r"<a:bodyPr(?![^>]*wrap=)", '<a:bodyPr wrap="none"', body, count=1)
+                        body = _re.sub(r'(<a:bodyPr[^>]*?)wrap="square"', r'\1wrap="none"', body, count=1)
+                    return body
+                x = _re.sub(r"<p:txBody>.*?</p:txBody>", one, x, flags=_re.S)
+                x = _re.sub(r'(<a:(?:rPr|defRPr|endParaRPr)[^>]*?\bsz=")(\d+)"',
+                            lambda m: m.group(1) + str(int(int(m.group(2)) * 0.95)) + '"', x)
+                data = x.encode("utf-8")
+            zo.writestr(item, data)
+    return out
+
+
 def _pptx_png_soffice(pptx_path: str, slide_no: int = 1, zoom: float = 2.0):
     """LibreOffice 로 PPTX → PDF → PNG. 웹(리눅스 서버)에서 쓰는 길.
 
@@ -182,6 +231,11 @@ def _pptx_png_soffice(pptx_path: str, slide_no: int = 1, zoom: float = 2.0):
     if not exe:
         return None, "LibreOffice 가 없어 미리보기를 만들 수 없습니다."
     tmp = _tf.mkdtemp(prefix="rf_so_")
+    _ensure_fonts()
+    try:
+        pptx_path = _lo_friendly(pptx_path)
+    except Exception:
+        pass
     try:
         _sp.run([exe, "--headless", "--norestore", "--convert-to", "pdf",
                  "--outdir", tmp, _os.path.abspath(pptx_path)],
