@@ -2052,6 +2052,19 @@ def even_cell_margins(d):
         bot = mar.find(qn("w:bottom"))
         rgt = mar.makeelement(qn("w:right"), {qn("w:w"): str(M), qn("w:type"): "dxa"})
         bot.addnext(rgt) if bot is not None else mar.append(rgt)
+        # ★글상자 노릇 칸(1칸짜리 표 또는 글 문단 3개 넘는 칸)은 위·아래도 같은 여백 — 0 이라 칸 높이를 글이 꽉 채우면
+        #   첫 줄이 위 테두리에 붙었다(고산 '2) 본건 기초자산 금융조건' 상자, 2026-10-27 사용자). 빽빽한 숫자 표 칸은 그대로(쪽 넘침)
+        tbl_ = tc.getparent().getparent() if tc.getparent() is not None else None
+        one_cell = tbl_ is not None and len(tbl_.findall(qn("w:tr"))) == 1 and len(tc.getparent().findall(qn("w:tc"))) == 1
+        if one_cell or sum(1 for p in ps if _par_text(p).strip()) >= 3:
+            for side in ("top", "bottom"):
+                e = mar.find(qn("w:" + side))
+                if e is None:
+                    e = mar.makeelement(qn("w:" + side), {qn("w:type"): "dxa"})
+                    (mar.insert(0, e) if side == "top" else mar.find(qn("w:right")).addprevious(e))
+                if int(float(e.get(qn("w:w")) or 0)) < 85:
+                    e.set(qn("w:w"), "85")
+                    e.set(qn("w:type"), "dxa")
 
         def jcv(p):
             jc = p.find(f"{qn('w:pPr')}/{qn('w:jc')}")
